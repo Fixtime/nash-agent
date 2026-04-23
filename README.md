@@ -1,61 +1,61 @@
 # Nash Agent
 
-Nash Agent is a local-first product strategy copilot for product managers. It turns a PRD, feature brief, or any other text case into a compact multi-player game model and helps evaluate whether a launch is strategically stable before engineering work begins.
+Nash Agent — это локальный копилот по продуктовой стратегии для менеджеров продукта. Он превращает PRD, описание фичи или любой другой текстовый кейс в компактную многопользовательскую игровую модель и помогает оценить, насколько запуск стратегически устойчив до начала разработки.
 
-## Value for a Product Manager
+## Ценность для продуктового менеджера
 
-- Turns a raw case description into a structured Nash-style analysis without requiring manual game theory setup.
-- Infers the most relevant actors, their incentives, and strategy choices from a product brief.
-- Estimates payoffs across strategy profiles and highlights stable equilibria, risks, and likely break moves.
-- Separates `Nash score` from `confidence`, so the PM can distinguish a strong position from an incomplete model.
-- Makes iteration fast: a finished analysis can be reopened, its conditions adjusted, and relaunched as a new case.
-- Works with a local LLM through LM Studio, so sensitive product strategy can stay on the PM's machine.
+- Превращает сырое описание кейса в структурированный анализ в логике Нэша без ручной настройки теории игр.
+- Сам выводит наиболее релевантных участников, их стимулы и возможные стратегии из продуктового описания.
+- Оценивает выигрыши по стратегическим профилям и подсвечивает устойчивые равновесия, риски и вероятные ходы, которые могут разрушить текущую позицию.
+- Разделяет `Nash score` и `confidence`, чтобы менеджер продукта видел разницу между сильной стратегической позицией и неполной моделью.
+- Ускоряет итерации: завершённый анализ можно открыть заново, изменить условия и запустить как новый кейс.
+- Работает с локальной LLM через LM Studio, поэтому чувствительная продуктовая стратегия может оставаться на машине менеджера продукта.
 
-## What the App Does
+## Что умеет приложение
 
-- Case wizard for entering a product strategy or feature case.
-- Automatic player and strategy generation from case description and context.
-- Multi-player Nash analysis with recommended equilibrium, payoff views, and risk signals.
-- Streaming LLM progress during analysis.
-- History of completed, failed, and cancelled cases.
-- Ability to inspect the original case inputs and relaunch a modified version.
+- Пошаговый сценарий для ввода продуктовой стратегии или фичи.
+- Автоматическая генерация игроков и стратегий по описанию кейса и контексту.
+- Многопользовательский Nash-анализ с рекомендуемым равновесием, представлением выигрышей и сигналами риска.
+- Потоковое отображение прогресса LLM во время анализа.
+- История завершённых, ошибочных и отменённых кейсов.
+- Возможность посмотреть исходные данные кейса и запустить изменённую версию повторно.
 
-## Architecture
+## Архитектура
 
-The project is organized as a single full-stack TypeScript app:
+Проект организован как единое full-stack TypeScript-приложение:
 
 - `client/`
-  - React app with Wouter routing.
-  - Tailwind CSS + shadcn/ui components.
-  - Recharts-based result visualizations.
-  - Pages:
-    - `NewAnalysis.tsx` for creating and relaunching cases.
-    - `AnalysisView.tsx` for result dashboards and source-case inspection.
-    - `History.tsx` for saved analyses, stop, and delete flows.
+  - React-приложение с маршрутизацией через Wouter.
+  - Tailwind CSS + компоненты shadcn/ui.
+  - Визуализация результатов на базе Recharts.
+  - Страницы:
+    - `NewAnalysis.tsx` — создание и повторный запуск кейсов.
+    - `AnalysisView.tsx` — дашборд результатов и просмотр исходных данных кейса.
+    - `History.tsx` — сохранённые анализы, остановка и удаление кейсов.
 
 - `server/`
-  - Express server and API routes.
-  - SSE streaming for analysis progress.
-  - OpenAI SDK integration targeting either OpenAI-compatible APIs or LM Studio.
-  - Local fallback debug mode for end-to-end UI testing without a real model.
+  - Express-сервер и API-маршруты.
+  - SSE-стриминг прогресса анализа.
+  - Интеграция через OpenAI SDK с OpenAI-compatible API или LM Studio.
+  - Локальный debug-режим для сквозной проверки UI без реальной модели.
 
 - `shared/`
-  - Shared Drizzle schema and TypeScript types used by both server and client.
+  - Общая Drizzle-схема и TypeScript-типы, которые используют и сервер, и клиент.
 
 - `SQLite + Drizzle`
-  - Local analysis persistence with `better-sqlite3`.
-  - Drizzle schema for analyses and result storage.
+  - Локальное хранение анализов через `better-sqlite3`.
+  - Drizzle-схема для хранения кейсов и результатов.
 
-## Analysis Flow
+## Поток анализа
 
-1. The PM describes a case and adds optional strategic context.
-2. The server asks the LLM to infer the compact set of core players and strategies.
-3. The backend generates a bounded strategy-profile space.
-4. The LLM evaluates payoffs and returns strategic interpretation.
-5. The backend computes equilibria, confidence, verdict, pairwise views, and dashboard output.
-6. The frontend renders the result and stores it in local history.
+1. Менеджер продукта описывает кейс и добавляет опциональный стратегический контекст.
+2. Сервер просит LLM вывести компактный набор ключевых игроков и стратегий.
+3. Бэкенд строит ограниченное пространство стратегических профилей.
+4. LLM оценивает выигрыши и возвращает стратегическую интерпретацию.
+5. Бэкенд рассчитывает равновесия, confidence, verdict, парные срезы и данные для дашборда.
+6. Фронтенд отображает результат и сохраняет его в локальной истории.
 
-## Stack
+## Стек
 
 - Express
 - React
@@ -68,19 +68,19 @@ The project is organized as a single full-stack TypeScript app:
 - Wouter
 - TanStack Query
 
-## Local Run
+## Локальный запуск
 
-### 1. Install dependencies
+### 1. Установите зависимости
 
 ```bash
 npm install
 ```
 
-### 2. Create local environment
+### 2. Создайте локальное окружение
 
-Copy `.env.example` to `.env` and adjust values if needed.
+Скопируйте `.env.example` в `.env` и при необходимости скорректируйте значения.
 
-Default configuration is already aligned with LM Studio:
+Конфигурация по умолчанию уже подготовлена под LM Studio:
 
 ```env
 DEBUG_LOCAL_LLM=false
@@ -92,38 +92,38 @@ PORT=5000
 HOST=127.0.0.1
 ```
 
-### 3. Start an LLM
+### 3. Запустите LLM
 
-You can run the app in either mode:
+Приложение можно запускать в одном из двух режимов:
 
 - `LM Studio mode`
-  - Start LM Studio.
-  - Load any OpenAI-compatible local model.
-  - Keep the local server exposed at `http://127.0.0.1:1234/v1`.
+  - Запустите LM Studio.
+  - Загрузите любую локальную модель с OpenAI-compatible API.
+  - Оставьте локальный сервер доступным по адресу `http://127.0.0.1:1234/v1`.
 
 - `Debug mode`
-  - Set `DEBUG_LOCAL_LLM=true` in `.env`.
-  - This is useful for UI and workflow debugging when no real model is available.
+  - Установите `DEBUG_LOCAL_LLM=true` в `.env`.
+  - Это полезно для отладки интерфейса и сценариев, когда реальная модель недоступна.
 
-### 4. Start the app
+### 4. Запустите приложение
 
 ```bash
 npm run dev
 ```
 
-Then open:
+После этого откройте:
 
 - `http://127.0.0.1:5000/#/`
-- if loopback is blocked in an embedded browser, use `http://127.0.0.1.nip.io:5000/#/`
+- если loopback заблокирован во встроенном браузере, используйте `http://127.0.0.1.nip.io:5000/#/`
 
-### 5. Type-check
+### 5. Проверьте типы
 
 ```bash
 npm run check
 ```
 
-## Notes
+## Примечания
 
-- The local SQLite database is stored in `nash.db` and is intentionally ignored by git.
-- `.env` is ignored by git as well.
-- The project currently focuses on local development flow. If you need production build and deployment, add or restore a production `build` pipeline before shipping.
+- Локальная база SQLite хранится в `nash.db` и намеренно исключена из git.
+- `.env` тоже исключён из git.
+- Сейчас проект ориентирован в первую очередь на локальный контур разработки. Если нужен production build и деплой, перед релизом стоит добавить или восстановить production-пайплайн сборки.
