@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+.DS_Store
+.env
+.env.local
+nash.db
+nash.db-shm
+nash.db-wal
+*.log
+coverage/
+*.tsbuildinfo
