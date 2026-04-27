@@ -4,6 +4,7 @@ build/
 .DS_Store
 .env
 .env.local
+.nash-agent-settings.json
 nash.db
 nash.db-shm
 nash.db-wal

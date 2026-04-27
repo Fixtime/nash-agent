@@ -79,6 +79,52 @@ export interface SensitivityCheck {
   note: string;
 }
 
+export type ProductDecision = "launch" | "revise" | "pause" | "kill";
+
+export interface StrategicMove {
+  title: string;
+  objective: string;
+  targetPlayerId: string;
+  changesIncentiveHow: string;
+  expectedNashScoreDelta: number;
+  expectedPayoffDelta: Record<string, number>;
+  effort: "S" | "M" | "L";
+  confidence: number;
+  priority: number;
+}
+
+export interface ExperimentPlanItem {
+  hypothesis: string;
+  metric: string;
+  guardrailMetric: string;
+  successCriterion: string;
+  killCriterion: string;
+  timebox: string;
+}
+
+export interface CounterMovePlaybookItem {
+  threat: string;
+  earlySignal: string;
+  mitigation: string;
+}
+
+export interface DecisionPack {
+  executiveSummary: string;
+  recommendedDecision: ProductDecision;
+  whyNow: string;
+  targetEquilibrium: string | null;
+  topStrategicMoves: StrategicMove[];
+  experimentPlan: ExperimentPlanItem[];
+  launchGuardrails: string[];
+  counterMovePlaybook: CounterMovePlaybookItem[];
+  openQuestions: string[];
+}
+
+export interface AnalysisRuntimeStats {
+  durationMs: number;
+  chunks: number;
+}
+
 export interface AnalysisResult {
   playersUsed: Player[];
   aggregatedActors: string[];
@@ -95,6 +141,8 @@ export interface AnalysisResult {
   keyInsights: string[];
   breakEquilibriumMoves: string[];
   recommendations: string[];
+  decisionPack?: DecisionPack;
+  runtimeStats?: AnalysisRuntimeStats;
   gameType: string;
   payoffMatrix: PayoffCell[][];
   matrixPlayers: string[];
@@ -115,11 +163,26 @@ export type AnalysisProgressPhase =
   | "error"
   | "cancelled";
 
+export type AnalysisProgressStepId =
+  | "prepare_request"
+  | "setup_players"
+  | "build_profiles"
+  | "score_profiles"
+  | "compute_equilibrium"
+  | "agent_article"
+  | "decision_pack";
+
 export interface AnalysisLiveProgress {
   phase: AnalysisProgressPhase;
   phaseLabel: string;
   llmStatus: string;
   previewText: string;
+  profileCount: number | null;
+  profileProcessedCount: number | null;
+  requiresLlmCheck: boolean;
+  llmCheckMessage: string | null;
+  activeStepId: AnalysisProgressStepId | null;
+  completedStepIds: AnalysisProgressStepId[];
   startedAt: number;
   updatedAt: number;
   lastChunkAt: number | null;

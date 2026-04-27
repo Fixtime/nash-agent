@@ -11,16 +11,22 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import type { AnalysisLiveProgress, AnalysisStreamSnapshot, AnalysisType } from "@/lib/analysis-types";
+import type {
+  AnalysisLiveProgress,
+  AnalysisProgressStepId,
+  AnalysisStreamSnapshot,
+  AnalysisType,
+} from "@/lib/analysis-types";
 import {
   Brain,
   Check,
   ChevronLeft,
   ChevronRight,
+  Clock3,
   Layers,
+  RefreshCw,
   Settings2,
   Sparkles,
-  Users,
   Zap,
 } from "lucide-react";
 
@@ -36,6 +42,41 @@ const STEPS = [
   { label: "Контекст", icon: Settings2 },
   { label: "Запуск", icon: Zap },
 ];
+
+const ANALYSIS_PIPELINE_STEPS: Array<{ id: AnalysisProgressStepId; label: string }> = [
+  { id: "prepare_request", label: "Подготовка запроса к LLM" },
+  { id: "setup_players", label: "Выделение игроков и границ игры" },
+  { id: "build_profiles", label: "Генерация стратегий, допущений и профилей" },
+  { id: "score_profiles", label: "Оценка выигрышей по стратегическим профилям" },
+  { id: "compute_equilibrium", label: "Расчёт равновесий и индекса Нэша" },
+  { id: "agent_article", label: "Генерация развёрнутой статьи агента" },
+  { id: "decision_pack", label: "Сборка пакета решения для менеджера продукта" },
+];
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatProfileProgress(progress: AnalysisLiveProgress | null): string | null {
+  if (typeof progress?.profileCount !== "number") return null;
+
+  if (progress.phase === "payoff" && typeof progress.profileProcessedCount === "number") {
+    return `${progress.profileProcessedCount} из ${progress.profileCount} проф.`;
+  }
+
+  return `${progress.profileCount} проф.`;
+}
+
+function getPipelineStepState(progress: AnalysisLiveProgress | null, stepId: AnalysisProgressStepId) {
+  const completed = progress?.completedStepIds?.includes(stepId) || false;
+  const active = progress?.activeStepId === stepId && !completed;
+
+  return { completed, active };
+}
 
 function StepIndicator({ current }: { current: number }) {
   return (
@@ -251,7 +292,42 @@ function StepRunning({
   analysisId: number | null;
   progress: AnalysisLiveProgress | null;
 }) {
+  const { toast } = useToast();
+  const [now, setNow] = useState(() => Date.now());
+  const [isCheckingLlm, setIsCheckingLlm] = useState(false);
   const livePreview = progress?.previewText?.trim() || "";
+  const elapsedMs = progress?.startedAt ? Math.max(0, now - progress.startedAt) : 0;
+  const profileProgressLabel = formatProfileProgress(progress);
+
+  async function handleCheckLlm() {
+    if (!analysisId) return;
+
+    setIsCheckingLlm(true);
+    try {
+      const response = await apiRequest("POST", `/api/analyses/${analysisId}/check-llm`);
+      const payload = await response.json() as { model?: string };
+      toast({
+        title: "LLM загружена",
+        description: payload.model ? `Повторяем запрос на модели ${payload.model}` : "Повторяем тот же запрос",
+      });
+    } catch (error) {
+      toast({
+        title: "LLM ещё не готова",
+        description: error instanceof Error ? error.message : "Проверьте LM Studio и попробуйте снова",
+        variant: "destructive",
+      });
+    } finally {
+      setIsCheckingLlm(false);
+    }
+  }
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, []);
 
   return (
     <div className="flex flex-col items-center justify-center py-12 space-y-6">
@@ -266,29 +342,63 @@ function StepRunning({
       <div className="text-center">
         <p className="text-sm font-medium text-foreground">Агент Нэша моделирует игру...</p>
         <p className="text-xs text-muted-foreground mt-1">
-          {progress?.llmStatus || "Генерация игроков, стратегий, профилей выигрышей и равновесий Нэша"}
+          {progress?.llmStatus || "Стримим LLM-фазы и собираем итоговый пакет анализа"}
         </p>
         {analysisId && (
           <p className="text-xs text-muted-foreground/60 mt-1 font-mono">Номер анализа: #{analysisId}</p>
         )}
       </div>
 
-      <div className="space-y-2 w-full max-w-xs">
-        {[
-          "Выделение релевантных игроков",
-          "Генерация стратегий и допущений",
-          "Оценка стратегических профилей",
-          "Поиск равновесий Нэша",
-          "Формирование вердикта и рекомендаций",
-        ].map((item, index) => (
-          <div key={item} className="flex items-center gap-2.5 text-xs text-muted-foreground">
+      {progress?.requiresLlmCheck ? (
+        <div className="w-full max-w-md rounded-xl border border-primary/30 bg-primary/10 p-4 text-center">
+          <p className="text-sm font-medium text-foreground">LM Studio требует проверки модели</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {progress.llmCheckMessage || "Загрузите LLM в LM Studio, затем повторите текущий запрос."}
+          </p>
+          <Button
+            type="button"
+            className="mt-3"
+            onClick={handleCheckLlm}
+            disabled={!analysisId || isCheckingLlm}
+            data-testid="btn-check-loaded-llm"
+          >
+            <RefreshCw className={`w-4 h-4 mr-2 ${isCheckingLlm ? "animate-spin" : ""}`} />
+            Проверить загруженную LLM
+          </Button>
+        </div>
+      ) : null}
+
+      <div className="space-y-2 w-full max-w-sm">
+        {ANALYSIS_PIPELINE_STEPS.map((item) => {
+          const { completed, active } = getPipelineStepState(progress, item.id);
+
+          return (
+          <div
+            key={item.id}
+            className={`flex items-center gap-2.5 text-xs transition-colors ${
+              completed || active ? "text-foreground" : "text-muted-foreground"
+            }`}
+          >
             <div
-              className="w-1.5 h-1.5 rounded-full bg-primary/40 shrink-0 animate-pulse"
-              style={{ animationDelay: `${index * 0.3}s` }}
-            />
-            {item}
+              className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border transition-colors ${
+                completed
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : active
+                    ? "border-primary/70 bg-primary/10"
+                    : "border-border bg-background/30"
+              }`}
+              aria-hidden="true"
+            >
+              {completed ? (
+                <Check className="h-3 w-3" />
+              ) : active ? (
+                <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+              ) : null}
+            </div>
+            <span>{item.label}</span>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className="w-full max-w-2xl rounded-xl border border-border/70 bg-muted/20 p-4">
@@ -301,6 +411,17 @@ function StepRunning({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {progress?.startedAt ? (
+              <Badge variant="secondary" className="text-xs font-mono gap-1">
+                <Clock3 className="w-3 h-3" />
+                {formatElapsed(elapsedMs)}
+              </Badge>
+            ) : null}
+            {profileProgressLabel ? (
+              <Badge variant="secondary" className="text-xs font-mono">
+                {profileProgressLabel}
+              </Badge>
+            ) : null}
             {progress?.chunks ? (
               <Badge variant="secondary" className="text-xs font-mono">
                 {progress.chunks} фрагм.
@@ -309,6 +430,10 @@ function StepRunning({
             {progress?.error ? (
               <Badge variant="destructive" className="text-xs">
                 Ошибка
+              </Badge>
+            ) : progress?.requiresLlmCheck ? (
+              <Badge variant="secondary" className="text-xs">
+                Ждём проверку LLM
               </Badge>
             ) : (
               <Badge variant="outline" className="text-xs">

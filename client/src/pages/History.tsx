@@ -71,7 +71,7 @@ function getDisplayPlayers(analysis: Analysis, result: AnalysisResult | null) {
 }
 
 const VERDICT_CONFIG = {
-  launch: { label: "Готово", icon: CheckCircle2, cls: "verdict-launch" },
+  launch: { label: "Запускать", icon: CheckCircle2, cls: "verdict-launch" },
   revise: { label: "Доработать", icon: AlertTriangle, cls: "verdict-revise" },
   pause: { label: "Пауза", icon: PauseCircle, cls: "verdict-pause" },
   kill: { label: "Отменить", icon: XCircle, cls: "verdict-kill" },
@@ -146,6 +146,19 @@ function formatDate(timestamp: number | string | null | undefined) {
   }
 }
 
+function formatDuration(ms: number | null | undefined) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
+
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) return `${hours}ч ${minutes}м`;
+  if (minutes > 0) return `${minutes}м ${seconds}с`;
+  return `${seconds}с`;
+}
+
 function AnalysisCard({
   analysis,
   onStop,
@@ -167,6 +180,8 @@ function AnalysisCard({
   const VerdictIcon = verdictConfig?.icon;
   const profilesCount = result?.profiles?.length || result?.equilibria?.length || 0;
   const confidence = typeof result?.confidence === "number" ? Math.round(result.confidence) : null;
+  const runtimeDuration = formatDuration(result?.runtimeStats?.durationMs);
+  const runtimeChunks = typeof result?.runtimeStats?.chunks === "number" ? result.runtimeStats.chunks : null;
   const canStop = analysis.status === "pending" || analysis.status === "running";
   const canDelete = !canStop;
 
@@ -196,7 +211,7 @@ function AnalysisCard({
               {analysis.title}
             </h3>
 
-            {(players.length > 0 || profilesCount > 0 || confidence !== null) && (
+            {(players.length > 0 || profilesCount > 0 || confidence !== null || runtimeDuration || runtimeChunks !== null) && (
               <div className="flex items-center gap-2 flex-wrap mb-2">
                 {players.length > 0 && (
                   <Badge variant="secondary" className="text-xs gap-1">
@@ -214,6 +229,17 @@ function AnalysisCard({
                   <Badge variant="secondary" className="text-xs gap-1">
                     <Sparkles className="w-3 h-3" />
                     достов. {confidence}
+                  </Badge>
+                )}
+                {runtimeDuration && (
+                  <Badge variant="secondary" className="text-xs gap-1">
+                    <Clock className="w-3 h-3" />
+                    {runtimeDuration}
+                  </Badge>
+                )}
+                {runtimeChunks !== null && (
+                  <Badge variant="secondary" className="text-xs font-mono">
+                    {runtimeChunks} фрагм.
                   </Badge>
                 )}
               </div>

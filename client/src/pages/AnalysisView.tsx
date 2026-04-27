@@ -18,6 +18,7 @@ import type {
   AnalysisLiveProgress,
   AnalysisResult,
   AnalysisStreamSnapshot,
+  DecisionPack,
   PairwiseView,
   PayoffCell,
   Player,
@@ -39,9 +40,11 @@ import {
   CheckCircle2,
   ChevronRight,
   Copy,
+  FileDown,
   Layers,
   Lightbulb,
   PauseCircle,
+  RefreshCw,
   Settings2,
   Shield,
   Sparkles,
@@ -72,6 +75,16 @@ function formatElapsed(ms: number): string {
   const seconds = totalSeconds % 60;
 
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatProfileProgress(progress: AnalysisLiveProgress | null): string {
+  if (typeof progress?.profileCount !== "number") return "—";
+
+  if (progress.phase === "payoff" && typeof progress.profileProcessedCount === "number") {
+    return `${progress.profileProcessedCount} из ${progress.profileCount} проф.`;
+  }
+
+  return `${progress.profileCount} проф.`;
 }
 
 function copyViaExecCommand(text: string): boolean {
@@ -240,7 +253,7 @@ function getPlayerTypeLabel(type: Player["type"]) {
 
 const VERDICT_CONFIG = {
   launch: {
-    label: "Готово",
+    label: "Запускать",
     icon: CheckCircle2,
     cls: "verdict-launch",
     desc: "Найдено устойчивое положение. Стратегию можно передавать в разработку и готовить к запуску.",
@@ -508,6 +521,241 @@ function EquilibriaList({
   );
 }
 
+function getDecisionTargetName(targetPlayerId: string, playersById: Map<string, Player>) {
+  if (targetPlayerId === "system") return "Система игры";
+  return playersById.get(targetPlayerId)?.name || targetPlayerId;
+}
+
+function getEffortLabel(effort: string) {
+  switch (effort) {
+    case "S":
+      return "S";
+    case "L":
+      return "L";
+    default:
+      return "M";
+  }
+}
+
+const DECISION_TEXT_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/Support ticket volume per 100 orders/gi, "Количество обращений в поддержку на 100 заказов"],
+  [/Support tickets grow/gi, "Обращения в поддержку растут"],
+  [/Checkout conversion rate/gi, "Конверсия чекаута"],
+  [/Conversion uplift/gi, "Прирост конверсии"],
+  [/Drop-off rate/gi, "Доля отвалов"],
+  [/API uptime/gi, "Доступность API"],
+  [/error rate/gi, "доля ошибок"],
+  [/latency/gi, "задержка"],
+  [/fallback-механизм/gi, "резервный механизм"],
+  [/fallback mechanism/gi, "резервный механизм"],
+  [/fallback/gi, "резервный сценарий"],
+  [/per 100 orders/gi, "на 100 заказов"],
+];
+
+function localizeDecisionText(value: string): string {
+  return DECISION_TEXT_REPLACEMENTS.reduce(
+    (text, [pattern, replacement]) => text.replace(pattern, replacement),
+    value,
+  );
+}
+
+function DecisionPackSection({
+  decisionPack,
+  playersById,
+}: {
+  decisionPack: DecisionPack;
+  playersById: Map<string, Player>;
+}) {
+  const moves = decisionPack.topStrategicMoves || [];
+  const experiments = decisionPack.experimentPlan || [];
+  const guardrails = decisionPack.launchGuardrails || [];
+  const playbook = decisionPack.counterMovePlaybook || [];
+  const openQuestions = decisionPack.openQuestions || [];
+
+  return (
+    <Card className="mb-6 border-primary/25 bg-primary/5" data-testid="decision-pack">
+      <CardHeader className="pb-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0 max-w-3xl">
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <Badge className="text-xs">Что делать дальше</Badge>
+              {decisionPack.targetEquilibrium && (
+                <Badge variant="outline" className="text-xs font-mono">
+                  цель {decisionPack.targetEquilibrium}
+                </Badge>
+              )}
+            </div>
+            <CardTitle className="text-base font-semibold">План действий для продакт-менеджера</CardTitle>
+            <CardDescription className="text-sm mt-2 leading-relaxed">
+              {localizeDecisionText(decisionPack.executiveSummary)}
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-5">
+        {decisionPack.whyNow ? (
+          <div className="rounded-lg border border-primary/20 bg-background/50 p-3">
+            <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground mb-1">
+              Почему сейчас
+            </div>
+            <p className="text-sm text-foreground/90 leading-relaxed">{localizeDecisionText(decisionPack.whyNow)}</p>
+          </div>
+        ) : null}
+
+        {moves.length > 0 ? (
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <TrendingUp className="w-4 h-4 text-primary" />
+              <h2 className="text-sm font-semibold text-foreground">Стратегические ходы</h2>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+              {moves.map((move) => {
+                const payoffDeltas = Object.entries(move.expectedPayoffDelta || {})
+                  .filter(([, value]) => value !== 0)
+                  .slice(0, 4);
+
+                return (
+                  <div key={`${move.priority}-${move.title}`} className="rounded-lg border border-border/70 bg-background/60 p-3">
+                    <div className="flex items-center gap-1.5 flex-wrap mb-2">
+                      <Badge variant="secondary" className="text-xs font-mono">
+                        P{move.priority}
+                      </Badge>
+                      <Badge variant="outline" className="text-xs">
+                        усилие {getEffortLabel(move.effort)}
+                      </Badge>
+                      <Badge variant="outline" className="text-xs font-mono">
+                        +{move.expectedNashScoreDelta} к индексу
+                      </Badge>
+                      <Badge variant="outline" className="text-xs font-mono">
+                        уверенность {Math.round(move.confidence)}
+                      </Badge>
+                    </div>
+
+                    <div className="text-sm font-medium text-foreground leading-snug">{localizeDecisionText(move.title)}</div>
+                    <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{localizeDecisionText(move.objective)}</p>
+
+                    <div className="mt-3 text-xs">
+                      <span className="text-muted-foreground">Цель: </span>
+                      <span className="text-foreground">{getDecisionTargetName(move.targetPlayerId, playersById)}</span>
+                    </div>
+                    <p className="text-xs text-foreground/80 mt-1.5 leading-relaxed">{localizeDecisionText(move.changesIncentiveHow)}</p>
+
+                    {payoffDeltas.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5 mt-3">
+                        {payoffDeltas.map(([playerId, value]) => (
+                          <Badge key={playerId} variant="secondary" className="text-xs font-mono">
+                            {playersById.get(playerId)?.name || playerId} {value > 0 ? "+" : ""}
+                            {value}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
+        {experiments.length > 0 ? (
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <Target className="w-4 h-4 text-primary" />
+              <h2 className="text-sm font-semibold text-foreground">План проверки</h2>
+            </div>
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+              {experiments.map((experiment, index) => (
+                <div key={`${index}-${experiment.metric}`} className="rounded-lg border border-border/70 bg-background/60 p-3">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <Badge variant="secondary" className="text-xs font-mono">
+                      E{index + 1}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">{experiment.timebox}</span>
+                  </div>
+                  <p className="text-sm text-foreground/90 leading-relaxed">{localizeDecisionText(experiment.hypothesis)}</p>
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    <div>
+                      <div className="text-muted-foreground mb-0.5">Метрика</div>
+                      <div className="text-foreground/85">{localizeDecisionText(experiment.metric)}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground mb-0.5">Ограничитель</div>
+                      <div className="text-foreground/85">{localizeDecisionText(experiment.guardrailMetric)}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground mb-0.5">Успех</div>
+                      <div className="text-foreground/85">{localizeDecisionText(experiment.successCriterion)}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground mb-0.5">Остановка</div>
+                      <div className="text-foreground/85">{localizeDecisionText(experiment.killCriterion)}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
+          {guardrails.length > 0 ? (
+            <div className="rounded-lg border border-border/70 bg-background/60 p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <Shield className="w-4 h-4 text-primary" />
+                <h2 className="text-sm font-semibold text-foreground">Ограничители запуска</h2>
+              </div>
+              <div className="space-y-2">
+                {guardrails.map((guardrail, index) => (
+                  <div key={`${index}-${guardrail}`} className="flex gap-2 text-xs leading-relaxed">
+                    <span className="font-mono text-primary">{index + 1}.</span>
+                    <span className="text-foreground/85">{localizeDecisionText(guardrail)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {playbook.length > 0 ? (
+            <div className="rounded-lg border border-border/70 bg-background/60 p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle className="w-4 h-4 text-yellow-500" />
+                <h2 className="text-sm font-semibold text-foreground">Сценарии контрходов</h2>
+              </div>
+              <div className="space-y-3">
+                {playbook.map((item, index) => (
+                  <div key={`${index}-${item.threat}`} className="text-xs leading-relaxed">
+                    <div className="font-medium text-foreground">{localizeDecisionText(item.threat)}</div>
+                    <div className="mt-1 text-muted-foreground">Сигнал: {localizeDecisionText(item.earlySignal)}</div>
+                    <div className="mt-1 text-foreground/85">Ответ: {localizeDecisionText(item.mitigation)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {openQuestions.length > 0 ? (
+            <div className="rounded-lg border border-border/70 bg-background/60 p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <Lightbulb className="w-4 h-4 text-primary" />
+                <h2 className="text-sm font-semibold text-foreground">Открытые вопросы</h2>
+              </div>
+              <div className="space-y-2">
+                {openQuestions.map((question, index) => (
+                  <div key={`${index}-${question}`} className="flex gap-2 text-xs leading-relaxed">
+                    <span className="font-mono text-primary">{index + 1}.</span>
+                    <span className="text-foreground/85">{localizeDecisionText(question)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function LoadingSkeleton() {
   return (
     <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
@@ -531,7 +779,9 @@ function RunningState({
   analysis: Analysis;
   progress: AnalysisLiveProgress | null;
 }) {
+  const { toast } = useToast();
   const [now, setNow] = useState(() => Date.now());
+  const [isCheckingLlm, setIsCheckingLlm] = useState(false);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -552,6 +802,26 @@ function RunningState({
         : "Ответ от модели ещё идёт. Для локальных моделей через LM Studio это нормально.");
   const livePreview = progress?.previewText?.trim() || "";
 
+  async function handleCheckLlm() {
+    setIsCheckingLlm(true);
+    try {
+      const response = await apiRequest("POST", `/api/analyses/${analysis.id}/check-llm`);
+      const payload = await response.json() as { model?: string };
+      toast({
+        title: "LLM загружена",
+        description: payload.model ? `Повторяем запрос на модели ${payload.model}` : "Повторяем тот же запрос",
+      });
+    } catch (error) {
+      toast({
+        title: "LLM ещё не готова",
+        description: error instanceof Error ? error.message : "Проверьте LM Studio и попробуйте снова",
+        variant: "destructive",
+      });
+    } finally {
+      setIsCheckingLlm(false);
+    }
+  }
+
   return (
     <div className="max-w-4xl mx-auto px-6 py-12">
       <Card className="border-primary/20 bg-card/80 overflow-hidden">
@@ -570,7 +840,11 @@ function RunningState({
 
             <div className="space-y-2">
               <Badge variant="secondary" className="text-xs uppercase tracking-[0.2em]">
-                {analysis.status === "pending" ? "Подготовка модели" : "Ожидание модели"}
+                {progress?.requiresLlmCheck
+                  ? "Требуется проверка LLM"
+                  : analysis.status === "pending"
+                    ? "Подготовка модели"
+                    : "Ожидание модели"}
               </Badge>
               <h1 className="text-xl font-semibold text-foreground">Ждём ответ модели</h1>
               <p className="text-sm text-muted-foreground max-w-2xl">
@@ -603,11 +877,32 @@ function RunningState({
                 <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Поток</div>
                 <div className="mt-2 space-y-1.5 text-xs text-muted-foreground">
                   <p>Фаза: <span className="text-foreground">{progress?.phaseLabel || "Ожидание"}</span></p>
+                  <p>Время: <span className="font-mono text-foreground">{elapsedLabel}</span></p>
+                  <p>Профили: <span className="font-mono text-foreground">{formatProfileProgress(progress)}</span></p>
                   <p>Фрагменты: <span className="font-mono text-foreground">{progress?.chunks || 0}</span></p>
                   <p>Номер: <span className="font-mono text-foreground">#{analysis.id}</span></p>
                 </div>
               </div>
             </div>
+
+            {progress?.requiresLlmCheck ? (
+              <div className="w-full rounded-xl border border-primary/30 bg-primary/10 p-4 text-left">
+                <p className="text-sm font-medium text-foreground">LM Studio перегрузил модель</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {progress.llmCheckMessage || "Загрузите LLM в LM Studio, затем повторите текущий запрос."}
+                </p>
+                <Button
+                  type="button"
+                  className="mt-3"
+                  onClick={handleCheckLlm}
+                  disabled={isCheckingLlm}
+                  data-testid="btn-check-loaded-llm"
+                >
+                  <RefreshCw className={`w-4 h-4 mr-2 ${isCheckingLlm ? "animate-spin" : ""}`} />
+                  Проверить загруженную LLM
+                </Button>
+              </div>
+            ) : null}
 
             <div className="w-full text-left">
               <div className="flex items-center justify-between gap-3 mb-2">
@@ -800,6 +1095,7 @@ export default function AnalysisView() {
 
   const defaultPairwise = pairwiseViews[0]?.players.join("__") || "empty";
   const rawThinking = result?.rawThinking ?? "";
+  const decisionPack = result.decisionPack || null;
 
   async function handleCopyRawThinking() {
     if (!rawThinking) return;
@@ -1012,7 +1308,7 @@ export default function AnalysisView() {
           </CardHeader>
           <CardContent className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             {players.map((player) => (
-              <div key={player.id} className="rounded-lg border border-border/70 bg-muted/20 p-3">
+              <div key={player.id} className="min-w-0 overflow-hidden rounded-lg border border-border/70 bg-muted/20 p-3">
                 <div className="flex items-center gap-2 flex-wrap mb-2">
                   <div className="text-sm font-medium text-foreground">{player.name}</div>
                   <Badge variant="secondary" className="text-xs">{getPlayerTypeLabel(player.type)}</Badge>
@@ -1028,9 +1324,13 @@ export default function AnalysisView() {
                 )}
 
                 {player.strategies?.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex min-w-0 flex-wrap gap-1.5">
                     {player.strategies.map((strategy) => (
-                      <Badge key={strategy} variant="secondary" className="text-xs">
+                      <Badge
+                        key={strategy}
+                        variant="secondary"
+                        className="min-w-0 max-w-full whitespace-normal break-words text-left text-xs leading-relaxed"
+                      >
                         {strategy}
                       </Badge>
                     ))}
@@ -1232,7 +1532,7 @@ export default function AnalysisView() {
       )}
 
       {rawThinking && (
-        <Card>
+        <Card className="mb-4">
           <CardHeader className="pb-3 flex-row items-center justify-between space-y-0 gap-3">
             <CardTitle className="text-sm font-semibold flex items-center gap-2">
               <Brain className="w-4 h-4 text-muted-foreground" />
@@ -1251,17 +1551,28 @@ export default function AnalysisView() {
             </Button>
           </CardHeader>
           <CardContent>
-            <ScrollArea className="max-h-72 rounded-lg bg-muted/30">
-              <div
-                className="text-xs text-muted-foreground leading-relaxed font-mono whitespace-pre-wrap p-4"
-                data-testid="raw-thinking"
-              >
-                {rawThinking}
-              </div>
-            </ScrollArea>
+            <div
+              className="w-full rounded-lg bg-muted/30 px-5 py-4 text-sm leading-relaxed text-muted-foreground whitespace-pre-wrap break-words"
+              data-testid="raw-thinking"
+            >
+              {rawThinking}
+            </div>
           </CardContent>
         </Card>
       )}
+
+      {decisionPack ? (
+        <DecisionPackSection decisionPack={decisionPack} playersById={playersById} />
+      ) : null}
+
+      <div className="mt-8 flex justify-center">
+        <Button asChild variant="outline" className="gap-2">
+          <a href={`/api/analyses/${liveAnalysis.id}/pdf`} download data-testid="download-analysis-pdf">
+            <FileDown className="w-4 h-4" />
+            Скачать PDF-документ
+          </a>
+        </Button>
+      </div>
 
       <Dialog open={isCaseSourceOpen} onOpenChange={setIsCaseSourceOpen}>
         <DialogContent className="max-w-3xl">

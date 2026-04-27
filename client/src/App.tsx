@@ -6,8 +6,9 @@ import { Toaster } from "@/components/ui/toaster";
 import NewAnalysis from "@/pages/NewAnalysis";
 import AnalysisView from "@/pages/AnalysisView";
 import History from "@/pages/History";
+import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
-import { PlusCircle, Clock } from "lucide-react";
+import { PlusCircle, Clock, Settings as SettingsIcon } from "lucide-react";
 
 // ── SVG Logo ─────────────────────────────────────────────────────────────────
 function NashLogo({ size = 28 }: { size?: number }) {
@@ -39,6 +40,7 @@ function Sidebar() {
   const navItems = [
     { href: "/", label: "Новый кейс", icon: PlusCircle },
     { href: "/history", label: "Все кейсы", icon: Clock },
+    { href: "/settings", label: "Настройки", icon: SettingsIcon },
   ];
 
   return (
@@ -111,6 +113,7 @@ export default function App() {
             <Route path="/" component={NewAnalysis} />
             <Route path="/analysis/:id" component={AnalysisView} />
             <Route path="/history" component={History} />
+            <Route path="/settings" component={Settings} />
             <Route component={NotFound} />
           </Switch>
         </Layout>
