@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { useToast } from "@/hooks/use-toast";
 import type {
   AnalysisLiveProgress,
+  AnalysisMode,
   AnalysisProgressStepId,
   AnalysisStreamSnapshot,
   AnalysisType,
@@ -26,12 +27,12 @@ import {
   Layers,
   RefreshCw,
   Settings2,
-  Sparkles,
   Zap,
 } from "lucide-react";
 
 interface FormState {
   type: AnalysisType;
+  analysisMode: AnalysisMode;
   title: string;
   description: string;
   context: string;
@@ -43,7 +44,7 @@ const STEPS = [
   { label: "Запуск", icon: Zap },
 ];
 
-const ANALYSIS_PIPELINE_STEPS: Array<{ id: AnalysisProgressStepId; label: string }> = [
+const NASH_PIPELINE_STEPS: Array<{ id: AnalysisProgressStepId; label: string }> = [
   { id: "prepare_request", label: "Подготовка запроса к LLM" },
   { id: "setup_players", label: "Выделение игроков и границ игры" },
   { id: "build_profiles", label: "Генерация стратегий, допущений и профилей" },
@@ -52,6 +53,83 @@ const ANALYSIS_PIPELINE_STEPS: Array<{ id: AnalysisProgressStepId; label: string
   { id: "agent_article", label: "Генерация развёрнутой статьи агента" },
   { id: "decision_pack", label: "Сборка пакета решения для менеджера продукта" },
 ];
+
+const COMPLEXITY_PIPELINE_STEPS: Array<{ id: AnalysisProgressStepId; label: string }> = [
+  { id: "prepare_request", label: "Подготовка запроса к LLM" },
+  { id: "setup_players", label: "Сборка адаптивной модели системы" },
+  { id: "build_profiles", label: "Подготовка сценариев" },
+  { id: "score_profiles", label: "Прогон адаптивной симуляции" },
+  { id: "compute_equilibrium", label: "Поиск режимов системы" },
+  { id: "agent_article", label: "Генерация развёрнутого анализа" },
+  { id: "decision_pack", label: "Сборка пакета решения для менеджера продукта" },
+];
+
+const INTEGRATED_PIPELINE_STEPS: Array<{ id: AnalysisProgressStepId; label: string }> = [
+  { id: "prepare_request", label: "Подготовка запроса к LLM" },
+  { id: "integrated_nash_setup", label: "Нэш: игроки и границы игры" },
+  { id: "integrated_nash_profiles", label: "Нэш: стратегические профили" },
+  { id: "integrated_nash_payoffs", label: "Нэш: оценка выигрышей" },
+  { id: "integrated_nash_equilibrium", label: "Нэш: равновесия и индекс" },
+  { id: "integrated_nash_article", label: "Нэш: развёрнутый вывод" },
+  { id: "integrated_nash_decision", label: "Нэш: пакет решения" },
+  { id: "integrated_complexity_setup", label: "Сложность: игроки, переменные и связи" },
+  { id: "integrated_complexity_scenarios", label: "Сложность: сценарии" },
+  { id: "integrated_complexity_simulation", label: "Сложность: адаптивная симуляция" },
+  { id: "integrated_complexity_regimes", label: "Сложность: режимы системы" },
+  { id: "integrated_complexity_article", label: "Сложность: развёрнутый вывод" },
+  { id: "integrated_complexity_decision", label: "Сложность: пакет решения" },
+  { id: "integrated_synthesis", label: "Итог: достижимость равновесия" },
+];
+
+function getAnalysisModeLabel(mode: AnalysisMode): string {
+  switch (mode) {
+    case "complexity":
+      return "Complexity Theory";
+    case "integrated":
+      return "Совмещённый анализ";
+    default:
+      return "Game Theory";
+  }
+}
+
+function getModeCardDescription(mode: AnalysisMode): string {
+  switch (mode) {
+    case "complexity":
+      return "Смотрим что произойдёт, если игроки учатся, ошибаются, система идет по разным траекториям.";
+    case "integrated":
+      return "Смотрим насколько после запуска возможно достичь устойчивого состояния в реальном рынке.";
+    default:
+      return "Находим устойчивое состояние если игроки рациональны и правила игры заданы. Получаем целевое состояние системы.";
+  }
+}
+
+function getModePipelineSteps(mode: AnalysisMode) {
+  if (mode === "complexity") return COMPLEXITY_PIPELINE_STEPS;
+  if (mode === "integrated") return INTEGRATED_PIPELINE_STEPS;
+  return NASH_PIPELINE_STEPS;
+}
+
+function getModeModelSummary(mode: AnalysisMode): string {
+  switch (mode) {
+    case "complexity":
+      return "3 сценария · 8 шагов динамики";
+    case "integrated":
+      return "игровые профили + адаптивные сценарии";
+    default:
+      return "3-5 ключевых игроков · до 64 профилей";
+  }
+}
+
+function getRunningTitle(mode: AnalysisMode): string {
+  switch (mode) {
+    case "complexity":
+      return "Агент моделирует адаптивную систему...";
+    case "integrated":
+      return "Агент совмещает Нэша и динамику системы...";
+    default:
+      return "Агент Нэша моделирует игру...";
+  }
+}
 
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -114,6 +192,41 @@ function StepCase({
 
   return (
     <div className="space-y-5">
+      <div>
+        <Label className="text-sm font-medium mb-2 block">Режим анализа</Label>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {[
+            {
+              value: "nash" as const,
+              label: "Game Theory",
+            },
+            {
+              value: "complexity" as const,
+              label: "Complexity Theory",
+            },
+            {
+              value: "integrated" as const,
+              label: "Совмещённый анализ",
+            },
+          ].map(({ value, label }) => (
+            <button
+              key={value}
+              type="button"
+              data-testid={`mode-${value}`}
+              onClick={() => setForm({ ...form, analysisMode: value })}
+              className={`text-left p-4 rounded-lg border transition-all hover-elevate ${
+                form.analysisMode === value
+                  ? "border-primary bg-primary/10 text-foreground"
+                  : "border-border bg-card text-muted-foreground"
+              }`}
+            >
+              <div className="text-sm font-medium mb-1 text-foreground">{label}</div>
+              <div className="text-xs text-muted-foreground">{getModeCardDescription(value)}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div>
         <Label className="text-sm font-medium mb-2 block">Тип объекта анализа</Label>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -184,36 +297,7 @@ function StepCase({
           rows={10}
           className="bg-muted/50 resize-none leading-relaxed"
         />
-        <p className="text-xs text-muted-foreground mt-2">
-          Ручной ввод игроков больше не обязателен. Агент сам выделит 3-5 ключевых участников, предложит их стратегии и построит игровую модель.
-        </p>
       </div>
-
-      <Card className="border-primary/20 bg-primary/5">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-primary" />
-            Что агент сделает автоматически
-          </CardTitle>
-          <CardDescription className="text-xs">
-            После запуска сервер сам соберёт компактную многопользовательскую игру под ваш кейс.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          <div className="rounded-lg border border-border/60 bg-card/60 p-3">
-            <div className="text-xs font-medium text-foreground mb-1">Игроки</div>
-            <div className="text-xs text-muted-foreground">Выделит ключевых участников: команда, конкуренты, платформа, регулятор, спрос.</div>
-          </div>
-          <div className="rounded-lg border border-border/60 bg-card/60 p-3">
-            <div className="text-xs font-medium text-foreground mb-1">Стратегии</div>
-            <div className="text-xs text-muted-foreground">Сгенерирует 2-3 релевантных стратегии на игрока.</div>
-          </div>
-          <div className="rounded-lg border border-border/60 bg-card/60 p-3">
-            <div className="text-xs font-medium text-foreground mb-1">Профили игры</div>
-            <div className="text-xs text-muted-foreground">Построит и оценит до 64 стратегических профилей, затем найдёт устойчивые равновесия.</div>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 }
@@ -262,6 +346,12 @@ function StepContext({
         </CardHeader>
         <CardContent className="space-y-2">
           <div className="flex gap-3">
+            <span className="text-xs text-muted-foreground w-24 shrink-0">Режим</span>
+            <Badge variant="secondary" className="text-xs">
+              {getAnalysisModeLabel(form.analysisMode)}
+            </Badge>
+          </div>
+          <div className="flex gap-3">
             <span className="text-xs text-muted-foreground w-24 shrink-0">Тип</span>
             <Badge variant="secondary" className="text-xs">
               {form.type === "strategy" ? "Стратегия" : "Фича"}
@@ -277,7 +367,9 @@ function StepContext({
           </div>
           <div className="flex gap-3">
             <span className="text-xs text-muted-foreground w-24 shrink-0">Модель</span>
-            <span className="text-xs text-foreground font-mono">3-5 ключевых игроков · до 64 профилей</span>
+            <span className="text-xs text-foreground font-mono">
+              {getModeModelSummary(form.analysisMode)}
+            </span>
           </div>
         </CardContent>
       </Card>
@@ -287,9 +379,11 @@ function StepContext({
 
 function StepRunning({
   analysisId,
+  analysisMode,
   progress,
 }: {
   analysisId: number | null;
+  analysisMode: AnalysisMode;
   progress: AnalysisLiveProgress | null;
 }) {
   const { toast } = useToast();
@@ -298,6 +392,7 @@ function StepRunning({
   const livePreview = progress?.previewText?.trim() || "";
   const elapsedMs = progress?.startedAt ? Math.max(0, now - progress.startedAt) : 0;
   const profileProgressLabel = formatProfileProgress(progress);
+  const pipelineSteps = getModePipelineSteps(analysisMode);
 
   async function handleCheckLlm() {
     if (!analysisId) return;
@@ -340,7 +435,9 @@ function StepRunning({
       </div>
 
       <div className="text-center">
-        <p className="text-sm font-medium text-foreground">Агент Нэша моделирует игру...</p>
+        <p className="text-sm font-medium text-foreground">
+          {getRunningTitle(analysisMode)}
+        </p>
         <p className="text-xs text-muted-foreground mt-1">
           {progress?.llmStatus || "Стримим LLM-фазы и собираем итоговый пакет анализа"}
         </p>
@@ -369,7 +466,7 @@ function StepRunning({
       ) : null}
 
       <div className="space-y-2 w-full max-w-sm">
-        {ANALYSIS_PIPELINE_STEPS.map((item) => {
+        {pipelineSteps.map((item) => {
           const { completed, active } = getPipelineStepState(progress, item.id);
 
           return (
@@ -468,6 +565,7 @@ export default function NewAnalysis() {
 
   const [form, setForm] = useState<FormState>({
     type: "feature",
+    analysisMode: "nash",
     title: "",
     description: "",
     context: "",
@@ -479,6 +577,7 @@ export default function NewAnalysis() {
 
     setForm({
       type: draft.type,
+      analysisMode: draft.analysisMode || "nash",
       title: draft.title,
       description: draft.description,
       context: draft.context,
@@ -496,6 +595,9 @@ export default function NewAnalysis() {
     mutationFn: async (data: FormState) => {
       const payload = {
         type: data.type,
+        analysisMode: data.analysisMode,
+        analysis_mode: data.analysisMode,
+        mode: data.analysisMode,
         title: data.title.trim(),
         description: data.description,
         players: [],
@@ -580,7 +682,7 @@ export default function NewAnalysis() {
   const stepComponents = [
     <StepCase key="case" form={form} setForm={setForm} />,
     <StepContext key="context" form={form} setForm={setForm} />,
-    <StepRunning key="running" analysisId={createdId} progress={liveProgress} />,
+    <StepRunning key="running" analysisId={createdId} analysisMode={form.analysisMode} progress={liveProgress} />,
   ];
 
   const stepTitles = [
@@ -590,9 +692,17 @@ export default function NewAnalysis() {
   ];
 
   const stepDescriptions = [
-    "Дайте агенту качественное описание стратегии или фичи. Игроков и стратегии он соберёт сам.",
-    "Добавьте факторы, которые меняют лучшие ответы игроков и устойчивость равновесия.",
-    "Агент строит компактную многопользовательскую игровую модель и готовит рекомендации.",
+    "Дайте агенту качественное описание стратегии или фичи. Игроков и механику анализа он соберёт сам.",
+    form.analysisMode === "complexity"
+      ? "Добавьте факторы, которые меняют траекторию системы, обратные связи и ранние сигналы."
+      : form.analysisMode === "integrated"
+        ? "Добавьте факторы, которые одновременно меняют лучшие ответы игроков и траекторию адаптации системы."
+        : "Добавьте факторы, которые меняют лучшие ответы игроков и устойчивость равновесия.",
+    form.analysisMode === "complexity"
+      ? "Агент строит адаптивную модель системы и готовит рекомендации."
+      : form.analysisMode === "integrated"
+        ? "Агент строит игровую модель, адаптивную симуляцию и общий вывод для продуктового решения."
+        : "Агент строит компактную многопользовательскую игровую модель и готовит рекомендации.",
   ];
 
   return (

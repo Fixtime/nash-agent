@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ComponentType } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
@@ -18,7 +18,10 @@ import type {
   AnalysisLiveProgress,
   AnalysisResult,
   AnalysisStreamSnapshot,
+  AnyAnalysisResult,
+  ComplexityAnalysisResult,
   DecisionPack,
+  IntegratedAnalysisResult,
   PairwiseView,
   PayoffCell,
   Player,
@@ -134,6 +137,25 @@ function isAnalysisResult(value: unknown): value is AnalysisResult {
   );
 }
 
+function isComplexityResult(value: unknown): value is ComplexityAnalysisResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as ComplexityAnalysisResult).analysisMode === "complexity" &&
+    Array.isArray((value as ComplexityAnalysisResult).scenarios)
+  );
+}
+
+function isIntegratedResult(value: unknown): value is IntegratedAnalysisResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as IntegratedAnalysisResult).analysisMode === "integrated" &&
+    (value as IntegratedAnalysisResult).modelKind === "arthur_sandholm_hybrid" &&
+    typeof (value as IntegratedAnalysisResult).reachabilityOfNash === "number"
+  );
+}
+
 function parseErrorMessage(analysis: Analysis): string | null {
   if (!analysis.result) return null;
 
@@ -147,10 +169,12 @@ function parseErrorMessage(analysis: Analysis): string | null {
   }
 }
 
-function parseResult(analysis: Analysis): AnalysisResult | null {
+function parseResult(analysis: Analysis): AnyAnalysisResult | null {
   if (!analysis.result) return null;
   try {
     const parsed = JSON.parse(analysis.result) as unknown;
+    if (isIntegratedResult(parsed)) return parsed;
+    if (isComplexityResult(parsed)) return parsed;
     return isAnalysisResult(parsed) ? parsed : null;
   } catch {
     return null;
@@ -756,6 +780,704 @@ function DecisionPackSection({
   );
 }
 
+function ComplexityMetricCard({
+  title,
+  value,
+  description,
+  inverse = false,
+}: {
+  title: string;
+  value: number;
+  description: string;
+  inverse?: boolean;
+}) {
+  const colorClass = inverse
+    ? value >= 70 ? "text-red-400" : value >= 45 ? "text-amber-400" : "text-emerald-400"
+    : value >= 70 ? "text-emerald-400" : value >= 45 ? "text-amber-400" : "text-red-400";
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+          {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className={`text-2xl font-bold font-mono ${colorClass}`}>{Math.round(value)}</div>
+        <Progress value={clamp(value, 0, 100)} className="h-2 mt-3" />
+        <p className="text-xs text-muted-foreground mt-2">{description}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ComplexityResultView({ analysis, result }: { analysis: Analysis; result: ComplexityAnalysisResult }) {
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const [copiedRawThinking, setCopiedRawThinking] = useState(false);
+  const [isCaseSourceOpen, setIsCaseSourceOpen] = useState(false);
+  const verdictConfig = VERDICT_CONFIG[result.verdict as keyof typeof VERDICT_CONFIG] || VERDICT_CONFIG.revise;
+  const VerdictIcon = verdictConfig.icon;
+  const rawThinking = result.rawThinking || "";
+
+  async function handleCopyRawThinking() {
+    if (!rawThinking) return;
+
+    const copied = await copyText(rawThinking);
+    if (!copied) {
+      toast({
+        title: "Не удалось скопировать текст",
+        description: "Буфер обмена недоступен в этом браузере",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setCopiedRawThinking(true);
+    window.setTimeout(() => setCopiedRawThinking(false), 1600);
+    toast({
+      title: "Текст скопирован",
+      description: "Развёрнутый вывод уже в буфере обмена",
+    });
+  }
+
+  function handleRestartWithAdjustedConditions() {
+    saveAnalysisDraft({
+      type: analysis.type,
+      analysisMode: "complexity",
+      title: analysis.title,
+      description: analysis.description,
+      context: analysis.context,
+    });
+    setIsCaseSourceOpen(false);
+    setLocation("/");
+  }
+
+  return (
+    <div className="max-w-6xl mx-auto px-6 py-8" data-testid="complexity-analysis-view">
+      <Button variant="ghost" size="sm" onClick={() => setLocation("/history")} className="mb-6 -ml-2">
+        <ArrowLeft className="w-4 h-4 mr-1.5" />
+        Все кейсы
+      </Button>
+
+      <div className="mb-6">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <Badge variant="outline" className="text-xs">
+                {analysis.type === "strategy" ? "Стратегия" : "Фича"}
+              </Badge>
+              <Badge variant="secondary" className="text-xs">Экономика сложности</Badge>
+              <Badge variant="secondary" className="text-xs gap-1">
+                <Users className="w-3 h-3" />
+                {result.agentsUsed.length} игроков
+              </Badge>
+              <Badge variant="secondary" className="text-xs gap-1">
+                <Layers className="w-3 h-3" />
+                {result.scenarios.length} сценария
+              </Badge>
+            </div>
+            <h1 className="text-xl font-bold text-foreground">{analysis.title}</h1>
+            <p className="text-sm text-muted-foreground mt-2 max-w-3xl">{result.executiveSummary}</p>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-10 w-10 text-muted-foreground"
+              onClick={() => setIsCaseSourceOpen(true)}
+              title="Исходные данные кейса"
+              aria-label="Исходные данные кейса"
+            >
+              <Settings2 className="w-4 h-4" />
+            </Button>
+            <div className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border font-bold text-sm ${verdictConfig.cls}`}>
+              <VerdictIcon className="w-4 h-4" />
+              {result.verdictLabel || verdictConfig.label}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 mb-6">
+        <ComplexityMetricCard title="Устойчивость к сбоям" value={result.resilienceScore} description="Способность траектории пережить стресс-сценарий." />
+        <ComplexityMetricCard title="Адаптация" value={result.adaptationCapacity} description="Насколько быстро игроки меняют поведение без развала системы." />
+        <ComplexityMetricCard title="Захват траектории" value={result.lockInRisk} description="Риск закрепить дорогую раннюю траекторию." inverse />
+        <ComplexityMetricCard title="Каскадный сбой" value={result.cascadeRisk} description="Риск распространения локальной проблемы по системе." inverse />
+        <ComplexityMetricCard title="Манёвры" value={result.optionalityScore} description="Сколько будущих ходов остаётся после запуска." />
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Users className="w-4 h-4 text-primary" />
+              Адаптивные игроки
+            </CardTitle>
+            <CardDescription className="text-xs">Игроки, правила адаптации и вероятные ходы.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {result.agentsUsed.map((agent) => (
+              <div key={agent.id} className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                <div className="flex items-center gap-2 flex-wrap mb-2">
+                  <div className="text-sm font-medium text-foreground">{agent.name}</div>
+                  <Badge variant="secondary" className="text-xs">вес {agent.weight}</Badge>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {agent.likelyMoves.slice(0, 3).map((move) => (
+                    <Badge key={move} variant="outline" className="text-xs whitespace-normal break-words">
+                      {move}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-primary" />
+              Переменные состояния
+            </CardTitle>
+            <CardDescription className="text-xs">Что меняется во времени и влияет на траекторию запуска.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {result.stateVariables.map((variable) => (
+              <div key={variable.id}>
+                <div className="flex items-center justify-between gap-3 mb-1">
+                  <span className="text-sm text-foreground">{variable.name}</span>
+                  <span className="text-xs font-mono text-muted-foreground">{variable.initialValue}</span>
+                </div>
+                <Progress value={variable.initialValue} className="h-2" />
+                <p className="text-xs text-muted-foreground mt-1">{variable.description}</p>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card className="mb-4">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold">Сценарии адаптивной симуляции</CardTitle>
+          <CardDescription className="text-xs">Три траектории по 8 шагов: состояние системы, события и сигналы смены режима.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Tabs defaultValue={result.scenarios[0]?.id || "baseline"}>
+            <TabsList className="h-auto flex-wrap justify-start">
+              {result.scenarios.map((scenario) => (
+                <TabsTrigger key={scenario.id} value={scenario.id} className="text-xs">
+                  {scenario.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            {result.scenarios.map((scenario) => (
+              <TabsContent key={scenario.id} value={scenario.id}>
+                <div className="rounded-lg border border-border/70 overflow-hidden">
+                  <div className="p-3 border-b border-border/70 bg-muted/20">
+                    <p className="text-sm font-medium text-foreground">{scenario.outcomeSummary}</p>
+                    <p className="text-xs text-muted-foreground mt-1">{scenario.description}</p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-border/70 text-muted-foreground">
+                          <th className="p-2 text-left font-medium">Шаг</th>
+                          <th className="p-2 text-left font-medium">События</th>
+                          <th className="p-2 text-left font-medium">Сигналы</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {scenario.steps.map((step) => (
+                          <tr key={step.step} className="border-b border-border/40 align-top">
+                            <td className="p-2 font-mono text-foreground">{step.step}</td>
+                            <td className="p-2 text-foreground/85">{step.events.join("; ") || "Без сильных изменений"}</td>
+                            <td className="p-2 text-muted-foreground">{step.regimeSignals.join("; ") || "Нет пороговых сигналов"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </TabsContent>
+            ))}
+          </Tabs>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold">Обратные связи и пороговые переломы</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {[...result.feedbackLoops.map((loop) => `${loop.label}: ${loop.description}`), ...result.tippingPoints.map((point) => `${point.label}: ${point.consequence}`)].map((item, index) => (
+              <div key={`${index}-${item}`} className="flex gap-2 text-sm">
+                <span className="text-primary font-mono text-xs mt-0.5">{index + 1}.</span>
+                <span className="text-foreground/85 leading-relaxed">{item}</span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold">Режимы системы</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {result.dominantRegimes.map((regime) => (
+              <div key={regime.id} className="rounded-lg border border-border/70 bg-muted/20 p-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-sm font-medium text-foreground">{regime.label}</span>
+                  <Badge variant="outline" className="text-xs">{regime.severity === "high" ? "высокая важность" : regime.severity === "medium" ? "средняя важность" : "низкая важность"}</Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">{regime.evidence.join(" ")}</p>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card className="mb-4">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Lightbulb className="w-4 h-4 text-primary" />
+            Выводы и рекомендации
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            {result.keyInsights.map((insight, index) => (
+              <div key={`${index}-${insight}`} className="flex gap-2 text-sm">
+                <span className="text-primary font-mono text-xs mt-0.5">{index + 1}.</span>
+                <span className="text-foreground/90 leading-relaxed">{insight}</span>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-2">
+            {result.recommendations.map((recommendation, index) => (
+              <div key={`${index}-${recommendation}`} className="flex gap-2.5 p-2.5 rounded-lg bg-muted/50">
+                <ChevronRight className="w-3.5 h-3.5 text-primary shrink-0 mt-0.5" />
+                <span className="text-sm text-foreground/90 leading-relaxed">{recommendation}</span>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {rawThinking && (
+        <Card className="mb-4">
+          <CardHeader className="pb-3 flex-row items-center justify-between space-y-0 gap-3">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Brain className="w-4 h-4 text-muted-foreground" />
+              Развёрнутый анализ агента
+            </CardTitle>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground"
+              onClick={handleCopyRawThinking}
+              title={copiedRawThinking ? "Скопировано" : "Скопировать итоговый вывод"}
+              aria-label={copiedRawThinking ? "Скопировано" : "Скопировать итоговый вывод"}
+            >
+              {copiedRawThinking ? <CheckCircle2 className="w-4 h-4 text-primary" /> : <Copy className="w-4 h-4" />}
+            </Button>
+          </CardHeader>
+          <CardContent>
+            <div className="w-full rounded-lg bg-muted/30 px-5 py-4 text-sm leading-relaxed text-muted-foreground whitespace-pre-wrap break-words">
+              {rawThinking}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="mt-8 flex justify-center">
+        <Button asChild variant="outline" className="gap-2">
+          <a href={`/api/analyses/${analysis.id}/pdf`} download data-testid="download-analysis-pdf">
+            <FileDown className="w-4 h-4" />
+            Скачать PDF-документ
+          </a>
+        </Button>
+      </div>
+
+      <Dialog open={isCaseSourceOpen} onOpenChange={setIsCaseSourceOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Исходные данные кейса</DialogTitle>
+            <DialogDescription>Здесь можно посмотреть исходные поля текущего кейса и перенести их в новый анализ для правок.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Название</div>
+              <div className="rounded-lg border border-border/70 bg-muted/30 px-4 py-3 text-sm text-foreground">{analysis.title || "Без названия"}</div>
+            </div>
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Описание</div>
+              <ScrollArea className="h-48 rounded-lg border border-border/70 bg-muted/30">
+                <div className="px-4 py-3 text-sm leading-relaxed text-foreground whitespace-pre-wrap">{analysis.description || "Не заполнено"}</div>
+              </ScrollArea>
+            </div>
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Контекст</div>
+              <ScrollArea className="h-40 rounded-lg border border-border/70 bg-muted/30">
+                <div className="px-4 py-3 text-sm leading-relaxed text-foreground whitespace-pre-wrap">{analysis.context || "Не заполнено"}</div>
+              </ScrollArea>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button type="button" variant="outline" onClick={() => setIsCaseSourceOpen(false)}>
+              Закрыть
+            </Button>
+            <Button type="button" onClick={handleRestartWithAdjustedConditions}>
+              Поменять условия анализа
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function getBasinLabel(value: IntegratedAnalysisResult["basinOfAttraction"]) {
+  if (value === "wide") return "Широкая";
+  if (value === "narrow") return "Узкая";
+  return "Фрагментированная";
+}
+
+function getAgreementLabel(value: IntegratedAnalysisResult["agreementLevel"]) {
+  if (value === "high") return "Высокая";
+  if (value === "medium") return "Средняя";
+  return "Низкая";
+}
+
+function getConvergenceLabel(value: IntegratedAnalysisResult["convergenceExpectation"]) {
+  switch (value) {
+    case "toward_recommended_equilibrium":
+      return "Движение к рекомендованному равновесию";
+    case "toward_bad_equilibrium":
+      return "Риск плохого равновесия";
+    case "cycling":
+      return "Колебания поведения игроков";
+    case "fragmented":
+      return "Фрагментация траектории";
+    case "non_convergent":
+      return "Нет устойчивой траектории";
+    default:
+      return "Траектория неопределённа";
+  }
+}
+
+function IntegratedListCard({
+  title,
+  items,
+  icon: Icon,
+}: {
+  title: string;
+  items: string[];
+  icon: ComponentType<{ className?: string }>;
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <Icon className="w-4 h-4 text-primary" />
+          {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {items.length > 0 ? (
+          items.map((item, index) => (
+            <div key={`${index}-${item}`} className="flex gap-2 text-sm">
+              <span className="text-primary font-mono text-xs mt-0.5">{index + 1}.</span>
+              <span className="text-foreground/90 leading-relaxed">{item}</span>
+            </div>
+          ))
+        ) : (
+          <p className="text-sm text-muted-foreground">Нет отдельных пунктов.</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function IntegratedResultView({ analysis, result }: { analysis: Analysis; result: IntegratedAnalysisResult }) {
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const [copiedRawThinking, setCopiedRawThinking] = useState(false);
+  const [isCaseSourceOpen, setIsCaseSourceOpen] = useState(false);
+  const verdictConfig = VERDICT_CONFIG[result.verdict as keyof typeof VERDICT_CONFIG] || VERDICT_CONFIG.revise;
+  const VerdictIcon = verdictConfig.icon;
+  const rawThinking = result.rawThinking || "";
+
+  async function handleCopyRawThinking() {
+    if (!rawThinking) return;
+
+    const copied = await copyText(rawThinking);
+    if (!copied) {
+      toast({
+        title: "Не удалось скопировать текст",
+        description: "Буфер обмена недоступен в этом браузере",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setCopiedRawThinking(true);
+    window.setTimeout(() => setCopiedRawThinking(false), 1600);
+    toast({
+      title: "Текст скопирован",
+      description: "Совмещённый вывод уже в буфере обмена",
+    });
+  }
+
+  function handleRestartWithAdjustedConditions() {
+    saveAnalysisDraft({
+      type: analysis.type,
+      analysisMode: "integrated",
+      title: analysis.title,
+      description: analysis.description,
+      context: analysis.context,
+    });
+    setIsCaseSourceOpen(false);
+    setLocation("/");
+  }
+
+  return (
+    <div className="max-w-6xl mx-auto px-6 py-8" data-testid="integrated-analysis-view">
+      <Button variant="ghost" size="sm" onClick={() => setLocation("/history")} className="mb-6 -ml-2">
+        <ArrowLeft className="w-4 h-4 mr-1.5" />
+        Все кейсы
+      </Button>
+
+      <div className="mb-6">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <Badge variant="outline" className="text-xs">
+                {analysis.type === "strategy" ? "Стратегия" : "Фича"}
+              </Badge>
+              <Badge variant="secondary" className="text-xs">Совмещённый анализ</Badge>
+              <Badge variant="secondary" className="text-xs gap-1">
+                <Users className="w-3 h-3" />
+                {result.nash.playersUsed.length} игроков
+              </Badge>
+              <Badge variant="secondary" className="text-xs gap-1">
+                <Layers className="w-3 h-3" />
+                {result.nash.profiles.length} профилей · {result.complexity.scenarios.length} сценария
+              </Badge>
+            </div>
+            <h1 className="text-xl font-bold text-foreground">{analysis.title}</h1>
+            <p className="text-sm text-muted-foreground mt-2 max-w-3xl">{result.executiveSummary}</p>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-10 w-10 text-muted-foreground"
+              onClick={() => setIsCaseSourceOpen(true)}
+              title="Исходные данные кейса"
+              aria-label="Исходные данные кейса"
+            >
+              <Settings2 className="w-4 h-4" />
+            </Button>
+            <div className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border font-bold text-sm ${verdictConfig.cls}`}>
+              <VerdictIcon className="w-4 h-4" />
+              {result.decisionLabel}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+        <ComplexityMetricCard title="Статическая устойчивость" value={result.staticStabilityScore} description="Насколько сильным выглядит равновесие в фиксированной игре." />
+        <ComplexityMetricCard title="Динамическая устойчивость" value={result.dynamicStabilityScore} description="Насколько система выдерживает адаптацию игроков." />
+        <ComplexityMetricCard title="Достижимость равновесия" value={result.reachabilityOfNash} description="Вероятность прийти к целевому профилю через реальные реакции." />
+        <ComplexityMetricCard title="Давление адаптации" value={result.adaptationPressure} description="Сила, с которой игроки будут менять поведение после запуска." inverse />
+      </div>
+
+      <Card className="mb-4 border-primary/30 bg-primary/5">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Target className="w-4 h-4 text-primary" />
+            Сводное решение
+          </CardTitle>
+          <CardDescription className="text-xs">
+            Математический слой: равновесие Нэша как целевой профиль, адаптивная динамика как проверка достижимости.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 lg:grid-cols-[1.2fr_0.8fr] gap-4">
+          <div className="rounded-lg bg-background/50 border border-border/60 p-4">
+            <p className="text-sm leading-relaxed text-foreground">{result.finalRecommendation}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="rounded-lg bg-muted/40 p-3">
+              <div className="text-muted-foreground mb-1">Область притяжения</div>
+              <div className="font-semibold text-foreground">{getBasinLabel(result.basinOfAttraction)}</div>
+            </div>
+            <div className="rounded-lg bg-muted/40 p-3">
+              <div className="text-muted-foreground mb-1">Согласованность</div>
+              <div className="font-semibold text-foreground">{getAgreementLabel(result.agreementLevel)}</div>
+            </div>
+            <div className="rounded-lg bg-muted/40 p-3 col-span-2">
+              <div className="text-muted-foreground mb-1">Ожидаемая траектория</div>
+              <div className="font-semibold text-foreground">{getConvergenceLabel(result.convergenceExpectation)}</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+        <IntegratedListCard title="Где подходы согласны" items={result.whereAnalysesAgree} icon={CheckCircle2} />
+        <IntegratedListCard title="Противоречия между слоями" items={result.contradictions} icon={AlertTriangle} />
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
+        <IntegratedListCard title="Продуктовые следствия" items={result.productImplications} icon={Lightbulb} />
+        <IntegratedListCard title="Что изменить до разработки" items={result.preDevelopmentChanges} icon={Settings2} />
+        <IntegratedListCard title="Ранние сигналы" items={result.earlySignalsToWatch} icon={Shield} />
+      </div>
+
+      <Card className="mb-4">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-primary" />
+            Дизайн пилота
+          </CardTitle>
+          <CardDescription className="text-xs">
+            Если статический профиль хорош, но траектория узкая, пилот проверяет именно достижимость равновесия.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {result.pilotDesign.map((item, index) => (
+            <div key={`${index}-${item}`} className="rounded-lg border border-border/70 bg-muted/20 p-3 text-sm text-foreground/90 leading-relaxed">
+              {item}
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold">Слой равновесия Нэша</CardTitle>
+            <CardDescription className="text-xs">Фиксированная игра: игроки, стратегии, выигрыши и односторонние отклонения.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Badge variant="secondary" className="justify-center">индекс {result.nash.nashScore}</Badge>
+              <Badge variant="secondary" className="justify-center">достов. {result.nash.confidence}</Badge>
+              <Badge variant="secondary" className="justify-center">{result.nash.equilibria.length} равн.</Badge>
+            </div>
+            {result.nash.keyInsights.slice(0, 4).map((item, index) => (
+              <div key={`${index}-${item}`} className="flex gap-2 text-sm">
+                <span className="text-primary font-mono text-xs mt-0.5">{index + 1}.</span>
+                <span className="text-foreground/90 leading-relaxed">{item}</span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold">Слой экономики сложности</CardTitle>
+            <CardDescription className="text-xs">Динамика: адаптация игроков, обратные связи, пороги и захват траектории.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <Badge variant="secondary" className="justify-center">уст. {result.complexity.resilienceScore}</Badge>
+              <Badge variant="secondary" className="justify-center">адапт. {result.complexity.adaptationCapacity}</Badge>
+              <Badge variant="secondary" className="justify-center">каскад {result.complexity.cascadeRisk}</Badge>
+            </div>
+            {result.complexity.keyInsights.slice(0, 4).map((item, index) => (
+              <div key={`${index}-${item}`} className="flex gap-2 text-sm">
+                <span className="text-primary font-mono text-xs mt-0.5">{index + 1}.</span>
+                <span className="text-foreground/90 leading-relaxed">{item}</span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      {rawThinking && (
+        <Card className="mb-4">
+          <CardHeader className="pb-3 flex-row items-center justify-between space-y-0 gap-3">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Brain className="w-4 h-4 text-muted-foreground" />
+              Развёрнутый совмещённый вывод
+            </CardTitle>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground"
+              onClick={handleCopyRawThinking}
+              title={copiedRawThinking ? "Скопировано" : "Скопировать итоговый вывод"}
+              aria-label={copiedRawThinking ? "Скопировано" : "Скопировать итоговый вывод"}
+            >
+              {copiedRawThinking ? <CheckCircle2 className="w-4 h-4 text-primary" /> : <Copy className="w-4 h-4" />}
+            </Button>
+          </CardHeader>
+          <CardContent>
+            <div className="w-full rounded-lg bg-muted/30 px-5 py-4 text-sm leading-relaxed text-muted-foreground whitespace-pre-wrap break-words">
+              {rawThinking}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="mt-8 flex justify-center">
+        <Button asChild variant="outline" className="gap-2">
+          <a href={`/api/analyses/${analysis.id}/pdf`} download data-testid="download-analysis-pdf">
+            <FileDown className="w-4 h-4" />
+            Скачать PDF-документ
+          </a>
+        </Button>
+      </div>
+
+      <Dialog open={isCaseSourceOpen} onOpenChange={setIsCaseSourceOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Исходные данные кейса</DialogTitle>
+            <DialogDescription>Здесь можно посмотреть исходные поля текущего кейса и перенести их в новый анализ для правок.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Название</div>
+              <div className="rounded-lg border border-border/70 bg-muted/30 px-4 py-3 text-sm text-foreground">{analysis.title || "Без названия"}</div>
+            </div>
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Описание</div>
+              <ScrollArea className="h-48 rounded-lg border border-border/70 bg-muted/30">
+                <div className="px-4 py-3 text-sm leading-relaxed text-foreground whitespace-pre-wrap">{analysis.description || "Не заполнено"}</div>
+              </ScrollArea>
+            </div>
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Контекст</div>
+              <ScrollArea className="h-40 rounded-lg border border-border/70 bg-muted/30">
+                <div className="px-4 py-3 text-sm leading-relaxed text-foreground whitespace-pre-wrap">{analysis.context || "Не заполнено"}</div>
+              </ScrollArea>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button type="button" variant="outline" onClick={() => setIsCaseSourceOpen(false)}>
+              Закрыть
+            </Button>
+            <Button type="button" onClick={handleRestartWithAdjustedConditions}>
+              Поменять условия анализа
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 function LoadingSkeleton() {
   return (
     <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
@@ -1071,6 +1793,14 @@ export default function AnalysisView() {
 
   if (!result) {
     return <LoadingResultState />;
+  }
+
+  if (isIntegratedResult(result)) {
+    return <IntegratedResultView analysis={liveAnalysis} result={result} />;
+  }
+
+  if (isComplexityResult(result)) {
+    return <ComplexityResultView analysis={liveAnalysis} result={result} />;
   }
 
   const players = getDisplayPlayers(liveAnalysis, result);

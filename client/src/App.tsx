@@ -47,10 +47,10 @@ function Sidebar() {
     <aside className="w-56 shrink-0 flex flex-col border-r border-sidebar-border bg-sidebar h-screen sticky top-0">
       {/* Brand */}
       <div className="flex items-center gap-2.5 px-4 py-4 border-b border-sidebar-border">
-        <NashLogo size={28} />
+        <NashLogo size={70} />
         <div>
-          <div className="text-sm font-bold text-foreground leading-tight">Агент Нэша</div>
-          <div className="text-xs text-muted-foreground leading-tight">Теория игр в продукте</div>
+          <div className="text-sm font-bold text-foreground leading-tight">Nash Agent</div>
+          <div className="text-xs text-muted-foreground leading-tight">Game & Complexity Theory for PM</div>
         </div>
       </div>
 
@@ -77,7 +77,7 @@ function Sidebar() {
       </nav>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-sidebar-border">
+      <div className="px-4 py-3 border-t border-sidebar-border flex flex-col gap-1.5">
         <a
           href="https://ru.wikipedia.org/wiki/%D0%9D%D1%8D%D1%88,_%D0%94%D0%B6%D0%BE%D0%BD_%D0%A4%D0%BE%D1%80%D0%B1%D1%81?ysclid=mobf7n0rc7252450983"
           target="_blank"
@@ -85,6 +85,14 @@ function Sidebar() {
           className="text-xs text-primary hover:text-primary/80 transition-colors"
         >
           John Forbes Nash
+        </a>
+        <a
+          href="https://en.wikipedia.org/wiki/W._Brian_Arthur"
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs text-primary hover:text-primary/80 transition-colors"
+        >
+          W. Brian Arthur
         </a>
       </div>
     </aside>

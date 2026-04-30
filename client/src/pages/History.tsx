@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
-import type { Analysis, AnalysisResult, Player } from "@/lib/analysis-types";
+import type { Analysis, AnalysisResult, AnyAnalysisResult, ComplexityAnalysisResult, IntegratedAnalysisResult, Player } from "@/lib/analysis-types";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -32,10 +32,31 @@ function isAnalysisResult(value: unknown): value is AnalysisResult {
   );
 }
 
-function parseResult(analysis: Analysis): AnalysisResult | null {
+function isComplexityResult(value: unknown): value is ComplexityAnalysisResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as ComplexityAnalysisResult).analysisMode === "complexity" &&
+    Array.isArray((value as ComplexityAnalysisResult).scenarios)
+  );
+}
+
+function isIntegratedResult(value: unknown): value is IntegratedAnalysisResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as IntegratedAnalysisResult).analysisMode === "integrated" &&
+    (value as IntegratedAnalysisResult).modelKind === "arthur_sandholm_hybrid" &&
+    typeof (value as IntegratedAnalysisResult).reachabilityOfNash === "number"
+  );
+}
+
+function parseResult(analysis: Analysis): AnyAnalysisResult | null {
   if (!analysis.result) return null;
   try {
     const parsed = JSON.parse(analysis.result) as unknown;
+    if (isIntegratedResult(parsed)) return parsed;
+    if (isComplexityResult(parsed)) return parsed;
     return isAnalysisResult(parsed) ? parsed : null;
   } catch {
     return null;
@@ -62,12 +83,20 @@ function parseSubmittedPlayers(analysis: Analysis): Player[] {
   }
 }
 
-function getDisplayPlayers(analysis: Analysis, result: AnalysisResult | null) {
-  if (result?.playersUsed?.length) {
-    return result.playersUsed;
+function getDisplayActors(analysis: Analysis, result: AnyAnalysisResult | null): string[] {
+  if (isIntegratedResult(result)) {
+    return result.nash.playersUsed.map((player) => player.name).filter(Boolean);
   }
 
-  return parseSubmittedPlayers(analysis);
+  if (isComplexityResult(result)) {
+    return result.agentsUsed.map((agent) => agent.name).filter(Boolean);
+  }
+
+  if (isAnalysisResult(result) && result.playersUsed?.length) {
+    return result.playersUsed.map((player) => player.name).filter(Boolean);
+  }
+
+  return parseSubmittedPlayers(analysis).map((player) => player.name).filter(Boolean);
 }
 
 const VERDICT_CONFIG = {
@@ -127,6 +156,10 @@ function NashScoreBar({ score }: { score: number }) {
   );
 }
 
+function ScoreBar({ score }: { score: number }) {
+  return <NashScoreBar score={score} />;
+}
+
 function formatDate(timestamp: number | string | null | undefined) {
   if (!timestamp) return "—";
   try {
@@ -144,6 +177,16 @@ function formatDate(timestamp: number | string | null | undefined) {
   } catch {
     return "—";
   }
+}
+
+function getCreatedAtTime(timestamp: number | string | Date | null | undefined) {
+  if (!timestamp) return 0;
+  const date =
+    typeof timestamp === "number"
+      ? new Date(timestamp > 1e10 ? timestamp : timestamp * 1000)
+      : new Date(timestamp);
+
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function formatDuration(ms: number | null | undefined) {
@@ -174,11 +217,20 @@ function AnalysisCard({
 }) {
   const [, setLocation] = useLocation();
   const result = parseResult(analysis);
-  const players = getDisplayPlayers(analysis, result);
+  const isIntegrated = isIntegratedResult(result) || analysis.analysisMode === "integrated";
+  const isComplexity = isComplexityResult(result) || analysis.analysisMode === "complexity";
+  const actors = getDisplayActors(analysis, result);
   const verdict = result?.verdict as keyof typeof VERDICT_CONFIG | undefined;
   const verdictConfig = verdict ? VERDICT_CONFIG[verdict] : null;
+  const verdictLabel = isIntegratedResult(result) ? result.decisionLabel : verdictConfig?.label;
   const VerdictIcon = verdictConfig?.icon;
-  const profilesCount = result?.profiles?.length || result?.equilibria?.length || 0;
+  const profilesCount = isIntegratedResult(result)
+    ? result.nash.profiles.length + result.complexity.scenarios.reduce((count, scenario) => count + scenario.steps.length, 0)
+    : isComplexityResult(result)
+    ? result.scenarios.reduce((count, scenario) => count + scenario.steps.length, 0)
+    : isAnalysisResult(result)
+      ? result.profiles?.length || result.equilibria?.length || 0
+      : 0;
   const confidence = typeof result?.confidence === "number" ? Math.round(result.confidence) : null;
   const runtimeDuration = formatDuration(result?.runtimeStats?.durationMs);
   const runtimeChunks = typeof result?.runtimeStats?.chunks === "number" ? result.runtimeStats.chunks : null;
@@ -198,11 +250,14 @@ function AnalysisCard({
               <Badge variant="outline" className="text-xs shrink-0">
                 {analysis.type === "strategy" ? "Стратегия" : "Фича"}
               </Badge>
+              <Badge variant="secondary" className="text-xs shrink-0">
+                {isIntegrated ? "Совмещённый анализ" : isComplexity ? "Экономика сложности" : "Равновесие Нэша"}
+              </Badge>
               <StatusBadge status={analysis.status} />
               {verdictConfig && (
                 <span className={`flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border ${verdictConfig.cls}`}>
                   {VerdictIcon && <VerdictIcon className="w-3 h-3" />}
-                  {verdictConfig.label}
+                  {verdictLabel}
                 </span>
               )}
             </div>
@@ -211,18 +266,18 @@ function AnalysisCard({
               {analysis.title}
             </h3>
 
-            {(players.length > 0 || profilesCount > 0 || confidence !== null || runtimeDuration || runtimeChunks !== null) && (
+            {(actors.length > 0 || profilesCount > 0 || confidence !== null || runtimeDuration || runtimeChunks !== null) && (
               <div className="flex items-center gap-2 flex-wrap mb-2">
-                {players.length > 0 && (
+                {actors.length > 0 && (
                   <Badge variant="secondary" className="text-xs gap-1">
                     <Users className="w-3 h-3" />
-                    {players.length} игроков
+                    {actors.length} игроков
                   </Badge>
                 )}
                 {profilesCount > 0 && (
                   <Badge variant="secondary" className="text-xs gap-1">
                     <Layers className="w-3 h-3" />
-                    {profilesCount} профилей
+                    {isIntegrated ? `${profilesCount} элементов` : isComplexity ? `${profilesCount} шагов` : `${profilesCount} профилей`}
                   </Badge>
                 )}
                 {confidence !== null && (
@@ -245,22 +300,22 @@ function AnalysisCard({
               </div>
             )}
 
-            {players.length > 0 && (
+            {actors.length > 0 && (
               <div className="flex flex-wrap gap-1 mb-2">
-                {players.slice(0, 4).map((player) => (
-                  <span key={player.id} className="text-xs text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded">
-                    {player.name}
+                {actors.slice(0, 4).map((actor) => (
+                  <span key={actor} className="text-xs text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded">
+                    {actor}
                   </span>
                 ))}
-                {players.length > 4 && (
-                  <span className="text-xs text-muted-foreground">+{players.length - 4}</span>
+                {actors.length > 4 && (
+                  <span className="text-xs text-muted-foreground">+{actors.length - 4}</span>
                 )}
               </div>
             )}
 
             {result && (
               <div className="mt-2">
-                <NashScoreBar score={result.nashScore} />
+                <ScoreBar score={isIntegratedResult(result) ? result.reachabilityOfNash : isComplexityResult(result) ? result.resilienceScore : result.nashScore} />
               </div>
             )}
 
@@ -403,6 +458,13 @@ export default function History() {
     },
   });
 
+  const sortedAnalyses = analyses
+    ? [...analyses].sort((left, right) => {
+        const dateDelta = getCreatedAtTime(right.createdAt) - getCreatedAtTime(left.createdAt);
+        return dateDelta || right.id - left.id;
+      })
+    : [];
+
   return (
     <div className="max-w-3xl mx-auto px-6 py-8">
       <div className="flex items-center justify-between mb-8">
@@ -444,9 +506,9 @@ export default function History() {
         </Card>
       )}
 
-      {!isLoading && analyses && analyses.length > 0 && (
+      {!isLoading && sortedAnalyses.length > 0 && (
         <div className="space-y-3" data-testid="analyses-list">
-          {[...analyses].reverse().map((analysis) => (
+          {sortedAnalyses.map((analysis) => (
             <AnalysisCard
               key={analysis.id}
               analysis={analysis}

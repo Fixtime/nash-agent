@@ -6,8 +6,11 @@ import OpenAI from "openai";
 import PDFDocument from "pdfkit";
 import {
   type Analysis,
+  type AnalysisMode,
   insertAnalysisSchema,
   type AnalysisResult,
+  type ComplexityAnalysisResult,
+  type IntegratedAnalysisResult,
   type CounterMovePlaybookItem,
   type DecisionPack,
   type DeviationCheck,
@@ -21,6 +24,20 @@ import {
   type StrategicMove,
   type StrategyProfile,
 } from "@shared/schema";
+import {
+  COMPLEXITY_ARTICLE_SYSTEM_PROMPT,
+  COMPLEXITY_DECISION_SYSTEM_PROMPT,
+  COMPLEXITY_SETUP_SYSTEM_PROMPT,
+  assertComplexityGuardrails,
+  composeComplexityResult,
+  normalizeComplexityDecision,
+  normalizeComplexitySetup,
+  simulateComplexitySystem,
+  type ComplexityArticleResponse,
+  type ComplexityDecisionResponse,
+  type ComplexitySetupResponse,
+  type NormalizedComplexitySetup,
+} from "./complexity";
 import { storage } from "./storage";
 
 const MAX_CORE_PLAYERS = 5;
@@ -223,6 +240,42 @@ const AGENT_ARTICLE_SYSTEM_PROMPT = `Ты пишешь раздел «Развё
 Не добавляй заголовок «Развёрнутый анализ агента».
 Не добавляй служебные комментарии.`;
 
+const INTEGRATED_ARTICLE_SYSTEM_PROMPT = `Ты пишешь раздел «Развёрнутый совмещённый вывод» для генерального директора компании.
+
+Контекст: читатель не обязан знать теорию игр, равновесие Нэша, экономику сложности, ход расчётов, игроков, профили, сценарии или методологию агента. Текст должен сам объяснить, что было проверено, почему это важно для бизнеса и как из анализа следует управленческое решение.
+
+Задача: превратить результаты двух аналитических слоёв — равновесия Нэша и экономики сложности — в связную объясняющую статью на русском языке. Не пиши технический лог и не ограничивайся выводами. Объясняй так, чтобы руководитель понял, какая бизнес-игра разворачивается вокруг фичи или стратегии, почему хороший статический план может не реализоваться в динамике и что нужно сделать до разработки или запуска.
+
+Стиль:
+- русский язык без англицизмов, если есть нормальный русский эквивалент;
+- живой, ясный, управленческий тон;
+- формат объясняющей статьи на 9-14 абзацев;
+- объём: 6 000-9 000 знаков;
+- без JSON и markdown-таблиц;
+- можно использовать короткие смысловые подзаголовки обычным текстом;
+- не предполагай, что читатель видел предыдущие экраны агента;
+- не пересказывай весь исходный документ, но дай достаточно контекста кейса;
+- не предлагай «просто мониторить» без объяснения, какие решения должны следовать из сигналов;
+- термин payoff заменяй на «выигрыш», «полезность», «ценность» или «стимул»;
+- термин Nash можно использовать только как «равновесие Нэша» и сразу объяснять смысл простыми словами.
+
+Обязательная структура:
+1. Начни с краткого резюме для руководителя: что анализировали, какой итоговый вердикт и почему он не сводится к одной метрике.
+2. Объясни метод простыми словами: равновесие Нэша показывает устойчивость стимулов в статичной игре, экономика сложности показывает, как система реально движется во времени через адаптацию игроков, обратные связи и ранние события.
+3. Объясни, кто является ключевыми игроками в этом кейсе и почему они не просто «стейкхолдеры», а участники игры с собственными стимулами.
+4. Расскажи, что показал слой равновесия Нэша: какой профиль выглядит устойчивым или неустойчивым, какие стимулы выровнены, где есть риск односторонних отклонений.
+5. Расскажи, что показал слой экономики сложности: какие переменные состояния, обратные связи, пороговые переломы и ранние события могут изменить траекторию.
+6. Объясни расхождение или согласие двух подходов. Если статическая устойчивость высокая, а динамическая низкая, явно напиши: «на бумаге равновесие есть, но система может до него не дойти». Если наоборот, объясни, что нужно менять в правилах игры.
+7. Объясни метрику достижимости равновесия как управленческий показатель: это не вероятность успеха вообще, а оценка того, насколько реальные реакции игроков способны привести систему к целевому устойчивому профилю.
+8. Разбери плохую траекторию: как рациональные действия отдельных игроков могут привести к слабому результату для продукта.
+9. Разбери желаемую траекторию: какие условия должны быть созданы, чтобы игрокам было выгодно двигаться к полезному профилю.
+10. Сформулируй решение для руководителя: запускать, запускать пилотом, менять условия, ставить на паузу или отменять; объясни экономический смысл решения.
+11. Заверши сильным стратегическим выводом: какую систему поведения компания на самом деле проектирует этой фичей или стратегией.
+
+Выход:
+Верни только текст статьи для раздела «Развёрнутый совмещённый вывод».
+Не добавляй служебные комментарии, JSON или технические пояснения о промпте.`;
+
 const DECISION_SYSTEM_PROMPT = `Ты — Product Strategy Chief of Staff для менеджера продукта.
 
 Твоя задача: превратить готовую Nash-модель в прикладной PM Decision Pack.
@@ -376,7 +429,20 @@ type AnalysisProgressStepId =
   | "score_profiles"
   | "compute_equilibrium"
   | "agent_article"
-  | "decision_pack";
+  | "decision_pack"
+  | "integrated_nash_setup"
+  | "integrated_nash_profiles"
+  | "integrated_nash_payoffs"
+  | "integrated_nash_equilibrium"
+  | "integrated_nash_article"
+  | "integrated_nash_decision"
+  | "integrated_complexity_setup"
+  | "integrated_complexity_scenarios"
+  | "integrated_complexity_simulation"
+  | "integrated_complexity_regimes"
+  | "integrated_complexity_article"
+  | "integrated_complexity_decision"
+  | "integrated_synthesis";
 
 interface AnalysisLiveProgress {
   phase: AnalysisProgressPhase;
@@ -406,6 +472,19 @@ const ANALYSIS_PROGRESS_STEPS: AnalysisProgressStepId[] = [
   "compute_equilibrium",
   "agent_article",
   "decision_pack",
+  "integrated_nash_setup",
+  "integrated_nash_profiles",
+  "integrated_nash_payoffs",
+  "integrated_nash_equilibrium",
+  "integrated_nash_article",
+  "integrated_nash_decision",
+  "integrated_complexity_setup",
+  "integrated_complexity_scenarios",
+  "integrated_complexity_simulation",
+  "integrated_complexity_regimes",
+  "integrated_complexity_article",
+  "integrated_complexity_decision",
+  "integrated_synthesis",
 ];
 const analysisLiveProgress = new Map<number, AnalysisLiveProgress>();
 const analysisProgressCleanupTimers = new Map<number, ReturnType<typeof setTimeout>>();
@@ -1267,7 +1346,7 @@ function buildCaseBrief(
     : "Нет явных игроков от пользователя. Их нужно вывести из кейса.";
 
   return `## Объект анализа
-Тип: ${type === "strategy" ? "Продуктовая стратегия" : "Фича / Feature"}
+Тип: ${type === "strategy" ? "Продуктовая стратегия" : "Фича"}
 Название: ${title}
 Описание: ${description}
 
@@ -1382,6 +1461,94 @@ function buildCompactCaseBrief(
 
 ## Контекст
 ${truncatePromptText(context, 1400) || "Не указан"}`;
+}
+
+function buildComplexityCaseBrief(
+  type: string,
+  title: string,
+  description: string,
+  context: string
+): string {
+  return `## Объект анализа
+Тип: ${type === "strategy" ? "Продуктовая стратегия" : "Фича"}
+Название: ${title}
+Описание: ${description}
+
+## Контекст
+${context || "Не указан"}`;
+}
+
+function buildComplexitySetupUserPrompt(data: {
+  type: string;
+  title: string;
+  description: string;
+  context: string;
+}): string {
+  return `${buildComplexityCaseBrief(data.type, data.title, data.description, data.context)}
+
+Собери модель ограниченной адаптивной симуляции. Нужно подготовить игроков, переменные состояния, обратные связи, пороговые переломы, зависимости от ранних событий, вмешательства и три сценария.`;
+}
+
+function formatComplexitySetupForPrompt(setup: NormalizedComplexitySetup): string {
+  return JSON.stringify({
+    agentsUsed: setup.agentsUsed,
+    assumptions: setup.assumptions,
+    stateVariables: setup.stateVariables,
+    feedbackLoops: setup.feedbackLoops,
+    tippingPoints: setup.tippingPoints,
+    pathDependencies: setup.pathDependencies,
+    interventions: setup.interventions,
+  }, null, 2);
+}
+
+function formatComplexitySimulationForPrompt(simulation: ReturnType<typeof simulateComplexitySystem>): string {
+  return JSON.stringify({
+    scenarios: simulation.scenarios,
+    dominantRegimes: simulation.dominantRegimes,
+    earlySignals: simulation.earlySignals,
+    regimeShiftTriggers: simulation.regimeShiftTriggers,
+    scores: {
+      resilienceScore: simulation.resilienceScore,
+      adaptationCapacity: simulation.adaptationCapacity,
+      lockInRisk: simulation.lockInRisk,
+      cascadeRisk: simulation.cascadeRisk,
+      optionalityScore: simulation.optionalityScore,
+      confidence: simulation.confidence,
+      verdict: simulation.verdict,
+    },
+  }, null, 2);
+}
+
+function buildComplexityArticleUserPrompt(
+  data: { type: string; title: string; description: string; context: string },
+  setup: NormalizedComplexitySetup,
+  simulation: ReturnType<typeof simulateComplexitySystem>,
+): string {
+  return `${buildComplexityCaseBrief(data.type, data.title, data.description, data.context)}
+
+## Модель системы
+${formatComplexitySetupForPrompt(setup)}
+
+## Результат симуляции
+${formatComplexitySimulationForPrompt(simulation)}
+
+Напиши развёрнутый анализ траектории системы. Верни только JSON с полем rawThinking.`;
+}
+
+function buildComplexityDecisionUserPrompt(
+  data: { type: string; title: string; description: string; context: string },
+  setup: NormalizedComplexitySetup,
+  simulation: ReturnType<typeof simulateComplexitySystem>,
+): string {
+  return `${buildComplexityCaseBrief(data.type, data.title, data.description, data.context)}
+
+## Модель системы
+${formatComplexitySetupForPrompt(setup)}
+
+## Результат симуляции
+${formatComplexitySimulationForPrompt(simulation)}
+
+Собери управленческий вывод для менеджера продукта. Верни строго JSON по схеме.`;
 }
 
 function formatScoredProfilesForSynthesis(profiles: StrategyProfile[], players: Player[]): string {
@@ -2162,6 +2329,16 @@ const JSON_LANGUAGE_EXEMPT_KEYS = new Set([
   "recommendedDecision",
   "targetEquilibrium",
   "targetPlayerId",
+  "analysisMode",
+  "modelKind",
+  "variableId",
+  "targetDirection",
+  "op",
+  "timing",
+  "reversibility",
+  "kind",
+  "severity",
+  "dominantRegimeId",
   "effort",
   "expectedNashScoreDelta",
   "expectedPayoffDelta",
@@ -2199,6 +2376,34 @@ const TECHNICAL_JSON_VALUES = new Set([
   "stable",
   "unstable",
   "conditional",
+  "complexity",
+  "bounded_adaptive_simulation",
+  "baseline",
+  "upside",
+  "stress",
+  "team",
+  "reinforcing",
+  "balancing",
+  "up",
+  "down",
+  "range",
+  "lt",
+  "lte",
+  "gt",
+  "gte",
+  "between",
+  "prelaunch",
+  "postlaunch",
+  "easy",
+  "moderate",
+  "hard",
+  "growth",
+  "stall",
+  "lock_in",
+  "cascade",
+  "overload",
+  "commoditization",
+  "recovery",
   "competitor",
   "partner",
   "regulator",
@@ -3195,6 +3400,107 @@ ${assumptions.length ? assumptions.join("\n") : "Нет"}
 Напиши только статью для раздела «Развёрнутый анализ агента».`;
 }
 
+function buildIntegratedArticleUserPrompt(
+  data: { type: string; title: string; description: string; context: string },
+  result: IntegratedAnalysisResult,
+): string {
+  const recommended = result.nash.recommendedEquilibrium;
+  const playersById = new Map((result.nash.playersUsed || []).map((player) => [player.id, player]));
+  const recommendedStrategies = recommended
+    ? Object.entries(recommended.strategies || {})
+        .map(([playerId, strategy]) => {
+          const player = playersById.get(playerId);
+          const payoff = recommended.payoffs?.[playerId];
+          return `${player?.name || playerId}: ${strategy}${typeof payoff === "number" ? ` (${payoff})` : ""}`;
+        })
+        .join("; ")
+    : "рекомендованный профиль не найден";
+  const compact = {
+    finalDecision: result.decisionLabel,
+    finalRecommendation: result.finalRecommendation,
+    executiveSummary: result.executiveSummary,
+    metrics: {
+      staticStabilityScore: result.staticStabilityScore,
+      dynamicStabilityScore: result.dynamicStabilityScore,
+      reachabilityOfNash: result.reachabilityOfNash,
+      adaptationPressure: result.adaptationPressure,
+      basinOfAttraction: result.basinOfAttraction,
+      agreementLevel: result.agreementLevel,
+      convergenceExpectation: result.convergenceExpectation,
+      confidence: result.confidence,
+    },
+    nashLayer: {
+      nashScore: result.nash.nashScore,
+      riskLevel: result.nash.riskLevel,
+      verdict: result.nash.verdict,
+      gameType: result.nash.gameType,
+      players: result.nash.playersUsed.map((player) => ({
+        name: player.name,
+        type: player.type,
+        weight: player.weight,
+        incentives: player.incentives,
+        strategies: player.strategies,
+      })),
+      recommendedEquilibrium: recommended
+        ? {
+            profileId: recommended.profileId,
+            stability: recommended.stability,
+            description: recommended.description,
+            strategies: recommendedStrategies,
+          }
+        : null,
+      keyInsights: result.nash.keyInsights.slice(0, 6),
+      breakEquilibriumMoves: result.nash.breakEquilibriumMoves.slice(0, 6),
+      recommendations: result.nash.recommendations.slice(0, 6),
+      articleExcerpt: truncatePromptText(result.nash.rawThinking, 1800),
+    },
+    complexityLayer: {
+      resilienceScore: result.complexity.resilienceScore,
+      adaptationCapacity: result.complexity.adaptationCapacity,
+      lockInRisk: result.complexity.lockInRisk,
+      cascadeRisk: result.complexity.cascadeRisk,
+      optionalityScore: result.complexity.optionalityScore,
+      agents: result.complexity.agentsUsed.map((agent) => ({
+        name: agent.name,
+        type: agent.type,
+        weight: agent.weight,
+        goals: agent.goals,
+        likelyMoves: agent.likelyMoves,
+      })),
+      stateVariables: result.complexity.stateVariables,
+      feedbackLoops: result.complexity.feedbackLoops,
+      tippingPoints: result.complexity.tippingPoints,
+      scenarios: result.complexity.scenarios.map((scenario) => ({
+        label: scenario.label,
+        description: scenario.description,
+        outcomeSummary: scenario.outcomeSummary,
+        finalState: scenario.finalState,
+      })),
+      dominantRegimes: result.complexity.dominantRegimes,
+      earlySignals: result.complexity.earlySignals,
+      regimeShiftTriggers: result.complexity.regimeShiftTriggers,
+      keyInsights: result.complexity.keyInsights.slice(0, 6),
+      recommendations: result.complexity.recommendations.slice(0, 6),
+      articleExcerpt: truncatePromptText(result.complexity.rawThinking, 1800),
+    },
+    integratedLayer: {
+      whereAnalysesAgree: result.whereAnalysesAgree,
+      contradictions: result.contradictions,
+      productImplications: result.productImplications,
+      preDevelopmentChanges: result.preDevelopmentChanges,
+      pilotDesign: result.pilotDesign,
+      earlySignalsToWatch: result.earlySignalsToWatch,
+    },
+  };
+
+  return `${buildCompactCaseBrief(data.type, data.title, data.description, data.context)}
+
+## Данные совмещённого анализа
+${JSON.stringify(compact, null, 2)}
+
+Напиши объясняющую статью для генерального директора. Не предполагай, что читатель знает методологию или видел промежуточные экраны агента.`;
+}
+
 function buildFallbackAgentArticle(
   data: { title: string; description: string; context: string },
   players: Player[],
@@ -3744,6 +4050,7 @@ function runLocalDebugAnalysis(
   });
 
   return {
+    analysisMode: "nash",
     playersUsed: setup.players,
     aggregatedActors: setup.aggregatedActors,
     assumptions: uniqueStrings([
@@ -3769,6 +4076,618 @@ function runLocalDebugAnalysis(
     matrixStrategies: primaryPairwise?.matrixStrategies || {},
     rawThinking: agentArticle,
   };
+}
+
+function buildLocalDebugComplexitySetupResponse(data: {
+  type: string;
+  title: string;
+  description: string;
+  context: string;
+}): ComplexitySetupResponse {
+  return {
+    title: data.title,
+    agentsUsed: [
+      {
+        id: "a1",
+        name: "Команда продукта",
+        type: "team",
+        weight: 5,
+        goals: ["Запустить механику без перегрузки системы", "Сохранить пространство для корректировок"],
+        likelyMoves: ["Запустить ограниченный пилот", "Усилить наблюдение за ранними сигналами"],
+        adaptationRules: [
+          {
+            id: "r1",
+            label: "Сузить запуск при росте нагрузки",
+            priority: 1,
+            when: [{ variableId: "load", op: "gt", value: 62 }],
+            move: "Сузить аудиторию пилота и усилить поддержку",
+            impacts: { load: -8, trust: 3, optionality: 5 },
+            rationale: "Команда снижает перегрузку и сохраняет возможность менять механику.",
+          },
+          {
+            id: "r2",
+            label: "Масштабировать при устойчивом принятии",
+            priority: 2,
+            when: [{ variableId: "adoption", op: "gt", value: 65 }],
+            move: "Расширить охват при сохранении ограничителей",
+            impacts: { adoption: 5, unit_economics: 3, load: 3 },
+            rationale: "Хороший ранний сигнал позволяет расти, но создаёт операционное давление.",
+          },
+        ],
+      },
+      {
+        id: "a2",
+        name: "Целевые пользователи",
+        type: "user",
+        weight: 5,
+        goals: ["Получить понятную ценность", "Избежать лишнего трения"],
+        likelyMoves: ["Пробовать механику после понятного объяснения", "Отказываться при недоверии"],
+        adaptationRules: [
+          {
+            id: "r1",
+            label: "Усиливать использование при доверии",
+            priority: 1,
+            when: [{ variableId: "trust", op: "gt", value: 58 }],
+            move: "Активнее пользоваться новой механикой",
+            impacts: { adoption: 7, trust: 2, unit_economics: 4 },
+            rationale: "Доверие снижает осторожность и ускоряет принятие.",
+          },
+          {
+            id: "r2",
+            label: "Уходить при росте трения",
+            priority: 2,
+            when: [{ variableId: "load", op: "gt", value: 65 }],
+            move: "Откладывать использование механики",
+            impacts: { adoption: -6, trust: -5 },
+            rationale: "Пользователи быстро реагируют на сбои и непонятные условия.",
+          },
+        ],
+      },
+      {
+        id: "a3",
+        name: "Операционная команда",
+        type: "platform",
+        weight: 4,
+        goals: ["Сохранить стабильность процессов", "Не допустить резкого роста ручной работы"],
+        likelyMoves: ["Автоматизировать узкие места", "Ограничивать масштаб запуска"],
+        adaptationRules: [
+          {
+            id: "r1",
+            label: "Включать ручной контроль при рисках",
+            priority: 1,
+            when: [{ variableId: "fraud_pressure", op: "gt", value: 45 }],
+            move: "Добавить ручную проверку спорных случаев",
+            impacts: { fraud_pressure: -7, load: 5, trust: 2 },
+            rationale: "Контроль снижает злоупотребления, но повышает нагрузку.",
+          },
+        ],
+      },
+    ],
+    assumptions: [
+      "DEBUG_LOCAL_LLM активен: структура системы собрана локально для проверки интерфейса и пайплайна.",
+      "Модель описывает раннюю траекторию запуска, а не долгосрочную макроэкономическую динамику.",
+    ],
+    stateVariables: [
+      { id: "adoption", name: "Принятие пользователями", description: "Доля целевого сегмента, которая начинает пользоваться механикой.", initialValue: 44, targetDirection: "up" },
+      { id: "trust", name: "Доверие к механике", description: "Предсказуемость условий и уверенность участников.", initialValue: 54, targetDirection: "up" },
+      { id: "load", name: "Операционная нагрузка", description: "Нагрузка на поддержку, операции и соседние команды.", initialValue: 36, targetDirection: "down" },
+      { id: "fraud_pressure", name: "Давление злоупотреблений", description: "Риск атак на правила и экономику механики.", initialValue: 28, targetDirection: "down" },
+      { id: "unit_economics", name: "Юнит-экономика", description: "Экономическая устойчивость ранней траектории.", initialValue: 50, targetDirection: "up" },
+      { id: "optionality", name: "Пространство манёвров", description: "Насколько команда может менять условия без дорогого отката.", initialValue: 62, targetDirection: "up" },
+    ],
+    feedbackLoops: [
+      {
+        id: "loop_1",
+        type: "reinforcing",
+        label: "Доверие ускоряет принятие",
+        description: "Чем понятнее и стабильнее механика, тем быстрее пользователи вовлекаются.",
+        impacts: { adoption: 2, trust: 1 },
+      },
+      {
+        id: "loop_2",
+        type: "balancing",
+        label: "Нагрузка сдерживает рост",
+        description: "Рост принятия увеличивает нагрузку, а перегрузка снижает качество опыта.",
+        impacts: { load: 2, trust: -1 },
+      },
+    ],
+    tippingPoints: [
+      { id: "tip_1", label: "Потеря доверия", variableId: "trust", threshold: 38, direction: "down", consequence: "Пользователи начинают избегать механики даже при формальной выгоде." },
+      { id: "tip_2", label: "Операционная перегрузка", variableId: "load", threshold: 72, direction: "up", consequence: "Поддержка и операции становятся ограничителем роста." },
+      { id: "tip_3", label: "Злоупотребления меняют экономику", variableId: "fraud_pressure", threshold: 68, direction: "up", consequence: "Механика теряет экономическую устойчивость." },
+    ],
+    pathDependencies: [
+      { id: "path_1", earlyCondition: "Первый запуск проходит с понятными правилами и быстрым исправлением сбоев.", laterEffect: "Доверие закрепляется, и дальнейшие изменения воспринимаются спокойнее.", reversibility: "moderate" },
+      { id: "path_2", earlyCondition: "Первые пользователи сталкиваются с задержками и непонятными условиями.", laterEffect: "Недоверие закрепляется и требует дорогой коммуникации для исправления.", reversibility: "hard" },
+    ],
+    interventions: [
+      { id: "i1", timing: "prelaunch", label: "Пороговые ограничители пилота", description: "До запуска задать стоп-сигналы по нагрузке, доверию и злоупотреблениям.", intendedImpacts: { optionality: 8, load: -4 }, tradeoffs: ["Медленнее рост в первые недели"] },
+      { id: "i2", timing: "launch", label: "Наблюдение за ранними сигналами", description: "Ежедневно отслеживать переменные, которые указывают на смену режима.", intendedImpacts: { trust: 4, fraud_pressure: -3 }, tradeoffs: ["Нужен отдельный владелец мониторинга"] },
+    ],
+    scenarios: [
+      { id: "baseline", label: "Базовый сценарий", description: "Система развивается без сильного внешнего ускорения.", shocks: { adoption: 0, trust: 0, load: 1 } },
+      { id: "upside", label: "Сценарий ускоренного роста", description: "Первые пользователи быстро подтверждают ценность механики.", shocks: { adoption: 4, trust: 3, unit_economics: 2 } },
+      { id: "stress", label: "Стресс-сценарий", description: "Запуск сталкивается с перегрузкой и попытками злоупотреблений.", shocks: { adoption: -3, trust: -4, load: 5, fraud_pressure: 5, optionality: -3 } },
+    ],
+  };
+}
+
+function runLocalDebugComplexityAnalysis(
+  data: { type: string; title: string; description: string; context: string },
+  runtimeStats?: ComplexityAnalysisResult["runtimeStats"],
+): ComplexityAnalysisResult {
+  const setup = normalizeComplexitySetup(buildLocalDebugComplexitySetupResponse(data), data.title);
+  const simulation = simulateComplexitySystem(setup);
+  const decision = normalizeComplexityDecision({}, simulation);
+  const rawThinking = [
+    "Локальный режим собрал ограниченную адаптивную симуляцию без внешней языковой модели.",
+    simulation.executiveSummary,
+    "Главный смысл анализа: смотреть не на статически устойчивый профиль, а на то, как ранние реакции игроков меняют траекторию всей системы.",
+    ...simulation.keyInsights,
+  ].join("\n\n");
+
+  return composeComplexityResult(data.title, setup, simulation, decision, rawThinking, runtimeStats);
+}
+
+function toIntegratedDecisionLabel(decision: IntegratedAnalysisResult["finalDecision"]): string {
+  switch (decision) {
+    case "launch":
+      return "Запускать";
+    case "pilot":
+      return "Запустить пилот";
+    case "revise":
+      return "Поменять условия";
+    case "pause":
+      return "Взять паузу";
+    case "kill":
+      return "Не запускать";
+    default:
+      return "Поменять условия";
+  }
+}
+
+function toProductDecision(decision: IntegratedAnalysisResult["finalDecision"]): ProductDecision {
+  if (decision === "launch" || decision === "pause" || decision === "kill") {
+    return decision;
+  }
+
+  return "revise";
+}
+
+function getAgreementLevel(scoreGap: number, nash: AnalysisResult, complexity: ComplexityAnalysisResult): IntegratedAnalysisResult["agreementLevel"] {
+  const nashPositive = nash.verdict === "launch";
+  const complexityPositive = complexity.verdict === "launch";
+  const nashNegative = nash.verdict === "pause" || nash.verdict === "kill";
+  const complexityNegative = complexity.verdict === "pause" || complexity.verdict === "kill";
+
+  if (scoreGap <= 15 && ((nashPositive && complexityPositive) || (nashNegative && complexityNegative) || nash.verdict === complexity.verdict)) {
+    return "high";
+  }
+
+  if (scoreGap <= 30 || nash.verdict === complexity.verdict) {
+    return "medium";
+  }
+
+  return "low";
+}
+
+function getConvergenceExpectation(
+  reachabilityOfNash: number,
+  adaptationPressure: number,
+  basinOfAttraction: IntegratedAnalysisResult["basinOfAttraction"],
+  nash: AnalysisResult,
+  complexity: ComplexityAnalysisResult,
+): IntegratedAnalysisResult["convergenceExpectation"] {
+  if (reachabilityOfNash >= 72 && nash.nashScore >= 68 && basinOfAttraction === "wide") {
+    return "toward_recommended_equilibrium";
+  }
+
+  if (nash.nashScore < 45 && complexity.lockInRisk >= 65) {
+    return "toward_bad_equilibrium";
+  }
+
+  if (basinOfAttraction === "fragmented") {
+    return "fragmented";
+  }
+
+  if (adaptationPressure >= 70 && complexity.cascadeRisk >= 55) {
+    return "cycling";
+  }
+
+  return "non_convergent";
+}
+
+function getConvergenceExpectationLabel(value: IntegratedAnalysisResult["convergenceExpectation"]): string {
+  switch (value) {
+    case "toward_recommended_equilibrium":
+      return "система движется к рекомендованному равновесию";
+    case "toward_bad_equilibrium":
+      return "система рискует закрепиться в плохом равновесии";
+    case "cycling":
+      return "возможны повторяющиеся колебания поведения игроков";
+    case "fragmented":
+      return "траектория распадается на несколько локальных режимов";
+    case "non_convergent":
+      return "устойчивой траектории пока не видно";
+    default:
+      return "траектория неопределённа";
+  }
+}
+
+function localizeIntegratedArticleText(value: unknown): string {
+  return normalizePdfText(value)
+    .replace(/\bNash score\b/gi, "индекс Нэша")
+    .replace(/\bNash-равновес/gi, "равновес")
+    .replace(/\bNash\b/g, "Нэша")
+    .replace(/\bbest-effort\b/gi, "лучший приближённый")
+    .replace(/\bbottleneck\b/gi, "узкое место")
+    .replace(/\brollout\b/gi, "постепенный запуск")
+    .replace(/\bguardrails\b/gi, "ограничители")
+    .replace(/\bpayoff\b/gi, "выигрыш")
+    .replace(/\bscore\b/gi, "индекс")
+    .replace(/\bFeature\b/g, "Фича")
+    .replace(/\bPM\b/g, "продакт-менеджер");
+}
+
+function formatListForArticle(items: string[], fallback = "нет отдельных пунктов"): string {
+  const values = uniqueStrings(items.map(localizeIntegratedArticleText)).filter(Boolean);
+  return values.length ? values.join("; ") : fallback;
+}
+
+function formatPlayersForIntegratedArticle(players: Player[]): string {
+  if (!players.length) {
+    return "ключевые игроки не были выделены";
+  }
+
+  return players
+    .map((player) => {
+      const strategies = player.strategies?.length ? player.strategies.join(" / ") : "стратегии не указаны";
+      return `${localizeIntegratedArticleText(player.name)}: стимул — ${localizeIntegratedArticleText(player.incentives || "не указан")}; возможные ходы — ${localizeIntegratedArticleText(strategies)}`;
+    })
+    .join("; ");
+}
+
+function formatRecommendedEquilibriumForIntegratedArticle(result: AnalysisResult): string {
+  const recommended = result.recommendedEquilibrium;
+  const playersById = new Map((result.playersUsed || []).map((player) => [player.id, player]));
+
+  if (!recommended) {
+    return "точное рекомендованное равновесие не найдено; агент использует лучший из найденных профилей как ориентир для изменения правил игры";
+  }
+
+  const strategies = Object.entries(recommended.strategies || {})
+    .map(([playerId, strategy]) => {
+      const player = playersById.get(playerId);
+      const payoff = recommended.payoffs?.[playerId];
+      return `${localizeIntegratedArticleText(player?.name || playerId)}: ${localizeIntegratedArticleText(strategy)}${typeof payoff === "number" ? ` (выигрыш ${payoff})` : ""}`;
+    })
+    .join("; ");
+
+  return `${localizeIntegratedArticleText(recommended.description || "рекомендованный профиль")} Стратегии: ${strategies || "не указаны"}.`;
+}
+
+function formatComplexityScenarioSummary(result: ComplexityAnalysisResult): string {
+  if (!result.scenarios?.length) {
+    return "сценарные траектории не построены";
+  }
+
+  return result.scenarios
+    .map((scenario) => `${localizeIntegratedArticleText(scenario.label)}: ${localizeIntegratedArticleText(scenario.outcomeSummary || scenario.description)}`)
+    .join("; ");
+}
+
+function buildFallbackIntegratedArticle(
+  data: { title: string; description: string; context: string },
+  result: Omit<IntegratedAnalysisResult, "rawThinking">,
+): string {
+  const agreementText =
+    result.agreementLevel === "high"
+      ? "высокая"
+      : result.agreementLevel === "medium"
+        ? "средняя"
+        : "низкая";
+  const basinText =
+    result.basinOfAttraction === "wide"
+      ? "широкая"
+      : result.basinOfAttraction === "narrow"
+        ? "узкая"
+        : "фрагментированная";
+  const caseContext = localizeIntegratedArticleText(truncatePromptText(data.description, 900));
+  const players = formatPlayersForIntegratedArticle(result.nash.playersUsed || []);
+  const recommendedEquilibrium = formatRecommendedEquilibriumForIntegratedArticle(result.nash);
+  const scenarios = formatComplexityScenarioSummary(result.complexity);
+
+  return [
+    "Краткий вывод для руководителя",
+    `Мы анализировали кейс «${localizeIntegratedArticleText(data.title || result.title)}» не как список продуктовых пожеланий, а как систему поведения нескольких участников. В такой системе успех зависит не только от того, хочет ли компания запустить фичу или стратегию, но и от того, как на неё рационально отреагируют пользователи, партнёры, конкуренты, операционные команды и внешние платформы. Итоговый вывод: ${localizeIntegratedArticleText(result.decisionLabel.toLowerCase())}. Главная причина — ${localizeIntegratedArticleText(result.finalRecommendation)}`,
+    `Суть кейса: ${caseContext || "описание кейса не было заполнено подробно"}. Для руководителя важно, что агент проверял не красоту идеи, а устойчивость будущей бизнес-конфигурации: кто получает выгоду, кто несёт издержки, где возникнет сопротивление и сможет ли система сама прийти к полезному состоянию после первых реакций рынка.`,
+    "Как читать совмещённый анализ",
+    "Первый слой — равновесие Нэша. Простыми словами, это проверка устойчивости стимулов: существует ли такая конфигурация действий, при которой каждому ключевому игроку рационально оставаться в выбранной стратегии, потому что односторонний уход делает его положение не лучше, а хуже. Этот слой похож на фотографию игры в один момент времени: мы фиксируем игроков, стратегии и выигрыши и спрашиваем, насколько устойчиво выбранное положение.",
+    "Второй слой — экономика сложности. Он отвечает на другой вопрос: даже если на фотографии есть привлекательное равновесие, сможет ли реальная система до него дойти. Здесь игроки не стоят на месте: они учатся, копируют удачные ходы, реагируют на сбои, меняют цены, снижают или повышают участие, усиливают или ослабляют доверие. Поэтому этот слой похож не на фотографию, а на фильм о том, как ранние события меняют дальнейшую траекторию.",
+    "Кто участвует в игре",
+    `В модели Нэша ключевые игроки выглядят так: ${players}. Это не просто заинтересованные стороны. Каждый из них имеет собственную рациональность: пользователь выбирает удобство и доверие, партнёр или продавец выбирает окупаемость усилий, платформа выбирает рост при контролируемой нагрузке, конкурент выбирает скорость ответа, а операционная команда выбирает устойчивость процессов. Если продуктовый дизайн не учитывает эти стимулы, участники будут действовать логично для себя, но итог для компании может оказаться слабым.`,
+    "Что показал слой равновесия Нэша",
+    `Статическая устойчивость получила ${result.staticStabilityScore} из 100. Рекомендованный профиль можно описать так: ${recommendedEquilibrium} Это означает, что в зафиксированной игре есть понятная целевая конфигурация поведения. Но важна не сама цифра, а её смысл: чем выше статическая устойчивость, тем меньше у игроков причин немедленно отклоняться от целевого сценария, если правила игры уже настроены правильно.`,
+    `При этом слой Нэша показывает и угрозы нарушения равновесия: ${formatListForArticle(result.nash.breakEquilibriumMoves)}. Эти угрозы важны для управления, потому что они указывают, где игроки могут рационально уйти из желаемого сценария. Например, пользователь может не принять фичу, партнёр может не поддержать нужный уровень качества, внешняя платформа может стать узким местом, а команда может столкнуться с издержками, которые не были видны в первоначальном плане.`,
+    "Что показала экономика сложности",
+    `Динамическая устойчивость получила ${result.dynamicStabilityScore} из 100. Здесь агент смотрел уже не на один профиль действий, а на траектории системы. Сценарии выглядят так: ${scenarios}. Ключевые переменные состояния: ${formatListForArticle(result.complexity.stateVariables.map((variable) => `${variable.name} — стартовое значение ${variable.initialValue}`))}. Эти переменные важны потому, что они меняют поведение игроков: доверие ускоряет принятие, нагрузка может сдержать рост, злоупотребления могут разрушить экономику, а пространство манёвра определяет, насколько дорого будет откатывать ошибочный запуск.`,
+    `Особое внимание нужно уделить пороговым переломам и ранним сигналам. В модели выделены сигналы: ${formatListForArticle(result.earlySignalsToWatch)}. Их смысл не в том, чтобы «посмотреть аналитику после запуска», а в том, чтобы заранее договориться, какие управленческие действия будут включены при их появлении: сузить аудиторию, изменить правила, отключить часть сценария, усилить поддержку, поменять коммуникацию или остановить масштабирование.`,
+    "Где два подхода сходятся и расходятся",
+    `Согласованность двух подходов: ${agreementText}. Достижимость равновесия — ${result.reachabilityOfNash} из 100. Это центральная метрика совмещённого анализа. Она не означает общую вероятность коммерческого успеха. Она показывает более конкретную вещь: насколько реальные реакции игроков способны привести систему к тому устойчивому профилю, который выглядит разумным в статической модели.`,
+    result.contradictions.length
+      ? `Главные противоречия между слоями: ${formatListForArticle(result.contradictions)}. Если равновесие выглядит сильным на бумаге, но динамическая устойчивость низкая, это означает: план может быть правильным, но система до него не дойдёт без дополнительных условий. Если динамика выглядит лучше статической игры, это означает: потенциал есть, но текущие стимулы игроков ещё не выровнены.`
+      : `В этом кейсе явного конфликта между слоями немного. Это хороший знак, но не повод отключать осторожность: даже при согласованных выводах область притяжения может быть ${basinText}, а значит путь к устойчивому состоянию всё ещё зависит от первых решений и ограничителей запуска.`,
+    "Плохая траектория",
+    `Плохая траектория возникает не потому, что кто-то ведёт себя «неправильно». Она возникает, когда каждый участник действует рационально в рамках своих стимулов, но общая система деградирует. Пользователь избегает фичи при недостатке доверия, партнёр снижает участие при низкой выгоде или высокой сложности, операционная команда ограничивает масштаб при росте нагрузки, внешний поставщик становится источником сбоев, а конкурент копирует механику и снижает эффект первого хода. В результате компания может получить не рост, а слабое принятие, рост ручной работы, потерю доверия или дорогую зависимость от раннего ошибочного решения.`,
+    "Желаемая траектория",
+    `Желаемая траектория требует не убеждать игроков «вести себя лучше», а изменить правила игры так, чтобы полезное поведение стало рациональным. Для этого агент предлагает до разработки или перед запуском: ${formatListForArticle(result.preDevelopmentChanges)}. Если выбран пилот, его смысл не в осторожности ради осторожности. Пилот должен проверить, двигается ли система к целевому профилю: растёт ли доверие, сохраняется ли качество, не перегружаются ли операции, не возникает ли каскадный сбой и остаётся ли у компании возможность изменить условия без дорогого отката.`,
+    "Управленческое решение",
+    `Решение «${localizeIntegratedArticleText(result.decisionLabel)}» означает следующее: ${localizeIntegratedArticleText(result.finalRecommendation)} Область притяжения оценена как ${basinText}. Если она широкая, продукт может выдержать больше случайных отклонений. Если узкая, нужен аккуратный запуск с ограничителями. Если фрагментированная, разные группы игроков могут уйти в разные режимы поведения, и единый массовый запуск становится рискованным.`,
+    "Стратегический вывод",
+    `Компания проектирует не только фичу, экран или процесс. Она проектирует систему стимулов. Совмещённый анализ показывает, что сильная стратегия должна одновременно иметь устойчивое равновесие и достижимую траекторию к нему. Если есть только первое, получается красивый план, который рынок может не воспроизвести. Если есть только второе, система движется, но не обязательно к выгодному состоянию. Поэтому главный вопрос перед разработкой звучит так: какие условия нужно встроить в продукт, чтобы рациональные действия пользователей, партнёров, команд и внешних игроков сами вели систему к нужному для бизнеса результату.`,
+  ].join("\n\n");
+}
+
+function composeIntegratedAnalysisResult(
+  data: { title: string; description: string; context: string },
+  nash: AnalysisResult,
+  complexity: ComplexityAnalysisResult,
+  runtimeStats?: IntegratedAnalysisResult["runtimeStats"],
+): IntegratedAnalysisResult {
+  const staticStabilityScore = clamp(Math.round(nash.nashScore), 0, 100);
+  const dynamicStabilityScore = clamp(
+    Math.round(
+      complexity.resilienceScore * 0.4 +
+        complexity.adaptationCapacity * 0.25 +
+        complexity.optionalityScore * 0.2 +
+        (100 - complexity.cascadeRisk) * 0.15
+    ),
+    0,
+    100,
+  );
+  const reachabilityOfNash = clamp(
+    Math.round(
+      staticStabilityScore * 0.42 +
+        complexity.resilienceScore * 0.24 +
+        complexity.optionalityScore * 0.18 +
+        complexity.adaptationCapacity * 0.12 -
+        complexity.lockInRisk * 0.18 -
+        complexity.cascadeRisk * 0.14
+    ),
+    0,
+    100,
+  );
+  const scoreGap = Math.abs(staticStabilityScore - dynamicStabilityScore);
+  const adaptationPressure = clamp(
+    Math.round(
+      100 -
+        complexity.adaptationCapacity * 0.5 +
+        complexity.cascadeRisk * 0.3 +
+        complexity.lockInRisk * 0.25 +
+        scoreGap * 0.25
+    ),
+    0,
+    100,
+  );
+  const basinOfAttraction: IntegratedAnalysisResult["basinOfAttraction"] =
+    reachabilityOfNash >= 72 && complexity.cascadeRisk < 50 && complexity.lockInRisk < 60
+      ? "wide"
+      : reachabilityOfNash < 45 || complexity.cascadeRisk >= 72 || scoreGap >= 35
+        ? "fragmented"
+        : "narrow";
+  const convergenceExpectation = getConvergenceExpectation(
+    reachabilityOfNash,
+    adaptationPressure,
+    basinOfAttraction,
+    nash,
+    complexity,
+  );
+  const agreementLevel = getAgreementLevel(scoreGap, nash, complexity);
+
+  let finalDecision: IntegratedAnalysisResult["finalDecision"];
+  if (staticStabilityScore >= 72 && dynamicStabilityScore >= 68 && reachabilityOfNash >= 68) {
+    finalDecision = "launch";
+  } else if (staticStabilityScore >= 65 && dynamicStabilityScore < 60) {
+    finalDecision = "pilot";
+  } else if (staticStabilityScore < 55 && dynamicStabilityScore >= 60) {
+    finalDecision = "revise";
+  } else if (staticStabilityScore < 45 && dynamicStabilityScore < 45) {
+    finalDecision = complexity.lockInRisk >= 75 || complexity.cascadeRisk >= 75 ? "kill" : "pause";
+  } else {
+    finalDecision = reachabilityOfNash >= 55 ? "pilot" : "revise";
+  }
+
+  const decisionLabel = toIntegratedDecisionLabel(finalDecision);
+  const agreementText = agreementLevel === "high" ? "высокое" : agreementLevel === "medium" ? "среднее" : "низкое";
+  const whereAnalysesAgree = uniqueStrings([
+    staticStabilityScore >= 65 && dynamicStabilityScore >= 60
+      ? "Статическая игра и адаптивная траектория одновременно поддерживают осторожный запуск."
+      : "",
+    staticStabilityScore < 55 && dynamicStabilityScore < 55
+      ? "Оба слоя показывают, что текущие условия запуска недостаточно устойчивы."
+      : "",
+    complexity.cascadeRisk >= 60 || nash.riskLevel === "high" || nash.riskLevel === "critical"
+      ? "Главный риск связан не с одной ошибкой, а с распространением реакции игроков по системе."
+      : "",
+    nash.confidence >= 65 && complexity.confidence >= 65
+      ? "Качество исходной игровой модели достаточно для продуктового решения перед разработкой."
+      : "",
+  ]);
+  const contradictions = uniqueStrings([
+    staticStabilityScore >= 70 && dynamicStabilityScore < 60
+      ? "Равновесие выглядит привлекательным на статической матрице, но адаптивная динамика показывает трудную достижимость."
+      : "",
+    staticStabilityScore < 55 && dynamicStabilityScore >= 65
+      ? "Статическая игра не даёт сильного равновесия, но система может улучшиться через ранние вмешательства и обучение игроков."
+      : "",
+    scoreGap >= 30
+      ? `Разрыв между статической устойчивостью и динамической устойчивостью составляет ${scoreGap} пунктов.`
+      : "",
+    complexity.lockInRisk >= 65
+      ? "Есть риск рано закрепить траекторию, которую потом будет дорого развернуть даже при формально рациональных стратегиях."
+      : "",
+  ]);
+  const productImplications = uniqueStrings([
+    `Достижимость равновесия: ${reachabilityOfNash}/100. Это оценка того, насколько реальные адаптации игроков способны привести к рекомендованному профилю.`,
+    `Ожидаемая траектория: ${getConvergenceExpectationLabel(convergenceExpectation)}.`,
+    `Область притяжения: ${basinOfAttraction === "wide" ? "широкая" : basinOfAttraction === "narrow" ? "узкая" : "фрагментированная"}.`,
+    ...nash.keyInsights.slice(0, 2),
+    ...complexity.keyInsights.slice(0, 2),
+  ]);
+  const preDevelopmentChanges = uniqueStrings([
+    ...(finalDecision === "launch" ? nash.decisionPack?.launchGuardrails || [] : []),
+    ...(finalDecision === "pilot" || finalDecision === "revise" ? complexity.interventions.map((item) => item.label) : []),
+    ...nash.recommendations.slice(0, 2),
+    ...complexity.recommendations.slice(0, 2),
+  ]).slice(0, 7);
+  const pilotDesign = uniqueStrings([
+    "Запускать через ограниченную аудиторию и заранее заданные стоп-сигналы.",
+    "Отслеживать не только целевую метрику, но и переменные состояния системы: доверие, нагрузку, злоупотребления, пространство для манёвра.",
+    "Сравнивать фактические реакции игроков с рекомендованным профилем равновесия.",
+    ...complexity.earlySignals.slice(0, 3),
+  ]);
+  const earlySignalsToWatch = uniqueStrings([
+    ...complexity.earlySignals,
+    ...complexity.regimeShiftTriggers,
+    ...nash.breakEquilibriumMoves.slice(0, 3),
+  ]).slice(0, 10);
+  const confidence = clamp(Math.round((nash.confidence + complexity.confidence + (100 - scoreGap)) / 3), 0, 100);
+  const finalRecommendation =
+    finalDecision === "launch"
+      ? "Можно передавать в разработку, но сохранить ограничители запуска и мониторинг ранних сигналов."
+      : finalDecision === "pilot"
+        ? "Не запускать сразу на всю аудиторию: сначала проверить достижимость равновесия на управляемом пилоте."
+        : finalDecision === "revise"
+          ? "Перед разработкой изменить стимулы, правила или границы аудитории, чтобы статическая устойчивость и динамическая траектория сошлись."
+          : finalDecision === "pause"
+            ? "Взять паузу и собрать недостающие данные: сейчас риск неверной траектории выше пользы от немедленного запуска."
+            : "Не запускать в текущем виде: риск закрепить плохую траекторию слишком высок.";
+
+  const resultWithoutRawThinking: Omit<IntegratedAnalysisResult, "rawThinking"> = {
+    analysisMode: "integrated",
+    modelKind: "arthur_sandholm_hybrid",
+    title: data.title || nash.decisionPack?.targetEquilibrium || complexity.title,
+    executiveSummary: `${decisionLabel}. ${finalRecommendation} Согласованность подходов: ${agreementText}; достижимость равновесия: ${reachabilityOfNash}/100.`,
+    nash,
+    complexity,
+    staticStabilityScore,
+    dynamicStabilityScore,
+    reachabilityOfNash,
+    adaptationPressure,
+    basinOfAttraction,
+    pathDependenceRisk: complexity.lockInRisk,
+    lockInRisk: complexity.lockInRisk,
+    regimeShiftRisk: complexity.cascadeRisk,
+    convergenceExpectation,
+    agreementLevel,
+    confidence,
+    verdict: toProductDecision(finalDecision),
+    finalDecision,
+    decisionLabel,
+    whereAnalysesAgree,
+    contradictions,
+    productImplications,
+    preDevelopmentChanges,
+    pilotDesign,
+    earlySignalsToWatch,
+    finalRecommendation,
+    runtimeStats,
+  };
+
+  return {
+    ...resultWithoutRawThinking,
+    rawThinking: buildFallbackIntegratedArticle(data, resultWithoutRawThinking),
+  };
+}
+
+function runLocalDebugIntegratedAnalysis(
+  data: { type: string; title: string; description: string; players: string; context: string },
+  runtimeStats?: IntegratedAnalysisResult["runtimeStats"],
+): IntegratedAnalysisResult {
+  const nash = {
+    ...runLocalDebugAnalysis(data),
+    runtimeStats,
+  };
+  const complexity = runLocalDebugComplexityAnalysis(data, runtimeStats);
+
+  return composeIntegratedAnalysisResult(data, nash, complexity, runtimeStats);
+}
+
+async function inferComplexitySetup(
+  client: OpenAI,
+  analysisId: number,
+  model: string,
+  data: { type: string; title: string; description: string; context: string },
+  signal?: AbortSignal
+): Promise<NormalizedComplexitySetup> {
+  const raw = await requestJson<ComplexitySetupResponse>(
+    client,
+    analysisId,
+    model,
+    "setup",
+    "Сборка адаптивной модели системы",
+    COMPLEXITY_SETUP_SYSTEM_PROMPT,
+    buildComplexitySetupUserPrompt(data),
+    signal,
+  );
+
+  assertComplexityGuardrails(raw);
+  const setup = normalizeComplexitySetup(raw, data.title);
+  assertComplexityGuardrails(setup);
+  return setup;
+}
+
+async function generateComplexityArticle(
+  client: OpenAI,
+  analysisId: number,
+  model: string,
+  data: { type: string; title: string; description: string; context: string },
+  setup: NormalizedComplexitySetup,
+  simulation: ReturnType<typeof simulateComplexitySystem>,
+  signal?: AbortSignal
+): Promise<string> {
+  const raw = await requestJson<ComplexityArticleResponse>(
+    client,
+    analysisId,
+    model,
+    "finalizing",
+    "Развёрнутый анализ траектории системы",
+    COMPLEXITY_ARTICLE_SYSTEM_PROMPT,
+    buildComplexityArticleUserPrompt(data, setup, simulation),
+    signal,
+  );
+
+  const text = raw.rawThinking?.trim();
+  if (!text) {
+    throw new Error("LLM не вернула развёрнутый анализ Complexity-режима");
+  }
+
+  assertComplexityGuardrails(raw);
+  return text;
+}
+
+async function generateComplexityDecisionPack(
+  client: OpenAI,
+  analysisId: number,
+  model: string,
+  data: { type: string; title: string; description: string; context: string },
+  setup: NormalizedComplexitySetup,
+  simulation: ReturnType<typeof simulateComplexitySystem>,
+  signal?: AbortSignal
+): Promise<ReturnType<typeof normalizeComplexityDecision>> {
+  const raw = await requestJson<ComplexityDecisionResponse>(
+    client,
+    analysisId,
+    model,
+    "finalizing",
+    "Пакет решения по адаптивной траектории",
+    COMPLEXITY_DECISION_SYSTEM_PROMPT,
+    buildComplexityDecisionUserPrompt(data, setup, simulation),
+    signal,
+  );
+
+  assertComplexityGuardrails(raw);
+  return normalizeComplexityDecision(raw, simulation);
 }
 
 async function inferStrategicSetup(
@@ -4008,6 +4927,48 @@ async function generateAgentArticle(
   }
 }
 
+async function generateIntegratedArticle(
+  client: OpenAI,
+  analysisId: number,
+  model: string,
+  data: { type: string; title: string; description: string; context: string },
+  result: IntegratedAnalysisResult,
+  signal?: AbortSignal,
+): Promise<string> {
+  const fallback = result.rawThinking;
+
+  try {
+    return await requestText(
+      client,
+      analysisId,
+      model,
+      "finalizing",
+      "Развёрнутый совмещённый вывод",
+      INTEGRATED_ARTICLE_SYSTEM_PROMPT,
+      buildIntegratedArticleUserPrompt(data, result),
+      signal,
+    );
+  } catch (error) {
+    if (signal?.aborted || isAbortLikeError(error)) {
+      throw new AnalysisCancelledError();
+    }
+
+    const errorMessage = getErrorMessage(error);
+    appendLivePreview(
+      analysisId,
+      `\n\n[Развёрнутый совмещённый вывод] Не удалось получить статью от LLM, собрали объясняющий fallback из двух слоёв анализа: ${errorMessage}\n`,
+      {
+        phase: "finalizing",
+        phaseLabel: "Развёрнутый совмещённый вывод",
+        llmStatus: "Совмещённая статья собрана из уже рассчитанных слоёв анализа",
+        error: null,
+      },
+      false,
+    );
+    return fallback;
+  }
+}
+
 async function generateDecisionPack(
   client: OpenAI,
   analysisId: number,
@@ -4176,13 +5137,32 @@ function normalizePdfText(value: unknown): string {
     .trim();
 }
 
-function parseAnalysisResultForPdf(item: Analysis): AnalysisResult | null {
+function parseAnalysisResultForPdf(item: Analysis): AnalysisResult | ComplexityAnalysisResult | IntegratedAnalysisResult | null {
   if (!item.result) {
     return null;
   }
 
   try {
-    const parsed = JSON.parse(item.result) as Partial<AnalysisResult>;
+    const parsed = JSON.parse(item.result) as Partial<AnalysisResult> & Partial<ComplexityAnalysisResult> & Partial<IntegratedAnalysisResult>;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.analysisMode === "integrated" &&
+      parsed.modelKind === "arthur_sandholm_hybrid" &&
+      typeof parsed.reachabilityOfNash === "number"
+    ) {
+      return parsed as IntegratedAnalysisResult;
+    }
+
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.analysisMode === "complexity" &&
+      Array.isArray(parsed.scenarios)
+    ) {
+      return parsed as ComplexityAnalysisResult;
+    }
+
     if (
       parsed &&
       typeof parsed === "object" &&
@@ -4196,6 +5176,14 @@ function parseAnalysisResultForPdf(item: Analysis): AnalysisResult | null {
   }
 
   return null;
+}
+
+function isComplexityPdfResult(result: AnalysisResult | ComplexityAnalysisResult | IntegratedAnalysisResult): result is ComplexityAnalysisResult {
+  return result.analysisMode === "complexity";
+}
+
+function isIntegratedPdfResult(result: AnalysisResult | ComplexityAnalysisResult | IntegratedAnalysisResult): result is IntegratedAnalysisResult {
+  return result.analysisMode === "integrated";
 }
 
 function getPdfVerdictLabel(value: string): string {
@@ -4271,6 +5259,38 @@ function getPdfPlayerTypeLabel(value: string): string {
   }
 }
 
+function getPdfComplexityAgentTypeLabel(value: string): string {
+  switch (value) {
+    case "team":
+      return "Команда";
+    case "competitor":
+      return "Конкурент";
+    case "partner":
+      return "Партнёр";
+    case "regulator":
+      return "Регулятор";
+    case "user":
+      return "Пользователь";
+    case "platform":
+      return "Платформа";
+    default:
+      return "Другое";
+  }
+}
+
+function getPdfRegimeSeverityLabel(value: string): string {
+  switch (value) {
+    case "low":
+      return "низкая";
+    case "medium":
+      return "средняя";
+    case "high":
+      return "высокая";
+    default:
+      return value || "не указана";
+  }
+}
+
 function formatPdfDate(value: Analysis["createdAt"]): string {
   if (!value) {
     return "Не указано";
@@ -4316,6 +5336,16 @@ function formatPdfRecord(record: Record<string, unknown> | undefined, playersByI
 
   return Object.entries(record)
     .map(([key, value]) => `${playersById.get(key)?.name || key}: ${normalizePdfText(value)}`)
+    .join("; ");
+}
+
+function formatPdfStateRecord(record: Record<string, unknown> | undefined): string {
+  if (!record || Object.keys(record).length === 0) {
+    return "нет";
+  }
+
+  return Object.entries(record)
+    .map(([key, value]) => `${key}: ${normalizePdfText(value)}`)
     .join("; ");
 }
 
@@ -4462,6 +5492,12 @@ function addPdfFooter(doc: PDFKit.PDFDocument) {
 
 function buildPdfFileName(item: Analysis): string {
   const id = Number.isFinite(item.id) ? item.id : "analysis";
+  if (item.analysisMode === "integrated") {
+    return `integrated-analysis-${id}.pdf`;
+  }
+  if (item.analysisMode === "complexity") {
+    return `complexity-analysis-${id}.pdf`;
+  }
   return `nash-analysis-${id}.pdf`;
 }
 
@@ -4650,6 +5686,296 @@ function writeAnalysisPdf(doc: PDFKit.PDFDocument, item: Analysis, result: Analy
   addPdfFooter(doc);
 }
 
+function writeComplexityAnalysisPdf(doc: PDFKit.PDFDocument, item: Analysis, result: ComplexityAnalysisResult) {
+  registerPdfFonts(doc);
+
+  doc.fillColor("#111111");
+  setPdfFont(doc, true);
+  doc.fontSize(14).text(normalizePdfText(item.title), { lineGap: 2 });
+  doc.moveDown(0.3);
+  setPdfFont(doc);
+  doc.fontSize(10).text("Финальный документ анализа в логике экономики сложности", { lineGap: 2 });
+  doc.moveDown(0.6);
+
+  addPdfKeyValues(doc, [
+    ["Тип", item.type === "strategy" ? "Стратегия" : "Фича"],
+    ["Режим анализа", "Экономика сложности"],
+    ["Дата анализа", formatPdfDate(item.createdAt)],
+    ["Статус решения", result.verdictLabel || getPdfVerdictLabel(result.verdict)],
+    ["Устойчивость к сбоям", result.resilienceScore],
+    ["Способность к адаптации", result.adaptationCapacity],
+    ["Риск захвата траектории", result.lockInRisk],
+    ["Риск каскадного сбоя", result.cascadeRisk],
+    ["Пространство будущих манёвров", result.optionalityScore],
+    ["Достоверность", result.confidence],
+    ["Игроков", result.agentsUsed?.length || 0],
+    ["Сценариев", result.scenarios?.length || 0],
+    ["Время анализа", formatPdfDuration(result.runtimeStats?.durationMs)],
+    ["Фрагментов ответа", result.runtimeStats?.chunks],
+  ]);
+
+  addPdfSection(doc, "Исходные данные");
+  addPdfSubheading(doc, "Описание");
+  addPdfParagraph(doc, item.description || "Не заполнено");
+  addPdfSubheading(doc, "Контекст");
+  addPdfParagraph(doc, item.context || "Не заполнено");
+
+  addPdfSection(doc, "Краткая сводка");
+  addPdfParagraph(doc, result.executiveSummary);
+
+  addPdfSection(doc, "Адаптивные игроки");
+  (result.agentsUsed || []).forEach((agent) => {
+    addPdfSubheading(
+      doc,
+      `${agent.name} (${getPdfComplexityAgentTypeLabel(agent.type)}, вес ${agent.weight})`,
+    );
+    addPdfParagraph(doc, `Цели: ${(agent.goals || []).join("; ") || "нет"}`);
+    addPdfParagraph(doc, `Вероятные ходы: ${(agent.likelyMoves || []).join("; ") || "нет"}`);
+    if (agent.adaptationRules?.length) {
+      addPdfParagraph(
+        doc,
+        `Правила адаптации: ${agent.adaptationRules.map((rule) => rule.label).join("; ")}`,
+      );
+    }
+  });
+
+  addPdfSection(doc, "Переменные состояния");
+  (result.stateVariables || []).forEach((variable) => {
+    addPdfSubheading(doc, `${variable.name} - старт ${variable.initialValue}`);
+    addPdfParagraph(doc, variable.description);
+  });
+
+  addPdfSection(doc, "Обратные связи");
+  (result.feedbackLoops || []).forEach((loop) => {
+    addPdfSubheading(doc, `${loop.label} - ${loop.type === "reinforcing" ? "усиливающая" : "сдерживающая"}`);
+    addPdfParagraph(doc, loop.description);
+    if (loop.impacts && Object.keys(loop.impacts).length) {
+      addPdfParagraph(doc, `Влияния: ${formatPdfStateRecord(loop.impacts)}`);
+    }
+  });
+
+  addPdfSection(doc, "Пороговые переломы");
+  (result.tippingPoints || []).forEach((point) => {
+    addPdfSubheading(doc, `${point.label} - порог ${point.threshold}`);
+    addPdfParagraph(doc, point.consequence);
+  });
+
+  addPdfSection(doc, "Зависимости от ранних событий");
+  (result.pathDependencies || []).forEach((dependency) => {
+    addPdfSubheading(doc, `${dependency.id} - обратимость: ${dependency.reversibility}`);
+    addPdfParagraph(doc, dependency.earlyCondition);
+    addPdfParagraph(doc, dependency.laterEffect);
+  });
+
+  addPdfSection(doc, "Возможные вмешательства");
+  (result.interventions || []).forEach((intervention) => {
+    addPdfSubheading(doc, intervention.label);
+    addPdfParagraph(doc, intervention.description);
+    addPdfParagraph(doc, `Влияния: ${formatPdfStateRecord(intervention.intendedImpacts)}`);
+    if (intervention.tradeoffs?.length) {
+      addPdfParagraph(doc, `Компромиссы: ${intervention.tradeoffs.join("; ")}`);
+    }
+  });
+
+  addPdfSection(doc, "Сценарии симуляции");
+  (result.scenarios || []).forEach((scenario) => {
+    addPdfSubheading(doc, scenario.label);
+    addPdfParagraph(doc, scenario.description);
+    addPdfParagraph(doc, scenario.outcomeSummary);
+    addPdfParagraph(doc, `Финальное состояние: ${formatPdfStateRecord(scenario.finalState)}`);
+    (scenario.steps || []).forEach((step) => {
+      const events = step.events?.length ? step.events.join("; ") : "без сильных изменений";
+      const signals = step.regimeSignals?.length ? step.regimeSignals.join("; ") : "нет пороговых сигналов";
+      addPdfParagraph(doc, `Шаг ${step.step}: ${events}. Сигналы: ${signals}.`);
+    });
+  });
+
+  addPdfSection(doc, "Режимы системы");
+  (result.dominantRegimes || []).forEach((regime) => {
+    addPdfSubheading(doc, `${regime.label} - важность ${getPdfRegimeSeverityLabel(regime.severity)}`);
+    addPdfList(doc, regime.evidence, false);
+  });
+
+  addPdfSection(doc, "Ранние сигналы");
+  addPdfList(doc, result.earlySignals);
+
+  addPdfSection(doc, "Триггеры смены режима");
+  addPdfList(doc, result.regimeShiftTriggers);
+
+  addPdfSection(doc, "Ключевые выводы");
+  addPdfList(doc, result.keyInsights);
+
+  addPdfSection(doc, "Рекомендации");
+  addPdfList(doc, result.recommendations);
+
+  addPdfSection(doc, "Развёрнутый анализ агента");
+  addPdfParagraph(doc, result.rawThinking);
+
+  addPdfFooter(doc);
+}
+
+function writeIntegratedAnalysisPdf(doc: PDFKit.PDFDocument, item: Analysis, result: IntegratedAnalysisResult) {
+  registerPdfFonts(doc);
+
+  const basinLabel =
+    result.basinOfAttraction === "wide"
+      ? "широкая"
+      : result.basinOfAttraction === "narrow"
+        ? "узкая"
+        : "фрагментированная";
+  const agreementLabel =
+    result.agreementLevel === "high"
+      ? "высокая"
+      : result.agreementLevel === "medium"
+        ? "средняя"
+        : "низкая";
+
+  doc.fillColor("#111111");
+  setPdfFont(doc, true);
+  doc.fontSize(14).text(normalizePdfText(item.title), { lineGap: 2 });
+  doc.moveDown(0.3);
+  setPdfFont(doc);
+  doc.fontSize(10).text("Совмещённый документ анализа: равновесие Нэша + экономика сложности", { lineGap: 2 });
+  doc.moveDown(0.6);
+
+  addPdfKeyValues(doc, [
+    ["Тип", item.type === "strategy" ? "Стратегия" : "Фича"],
+    ["Режим анализа", "Совмещённый анализ"],
+    ["Дата анализа", formatPdfDate(item.createdAt)],
+    ["Итоговое решение", result.decisionLabel],
+    ["Статическая устойчивость", result.staticStabilityScore],
+    ["Динамическая устойчивость", result.dynamicStabilityScore],
+    ["Достижимость равновесия", result.reachabilityOfNash],
+    ["Давление адаптации", result.adaptationPressure],
+    ["Область притяжения", basinLabel],
+    ["Согласованность подходов", agreementLabel],
+    ["Достоверность", result.confidence],
+    ["Время анализа", formatPdfDuration(result.runtimeStats?.durationMs)],
+    ["Фрагментов ответа", result.runtimeStats?.chunks],
+  ]);
+
+  addPdfSection(doc, "Исходные данные");
+  addPdfSubheading(doc, "Описание");
+  addPdfParagraph(doc, item.description || "Не заполнено");
+  addPdfSubheading(doc, "Контекст");
+  addPdfParagraph(doc, item.context || "Не заполнено");
+
+  addPdfSection(doc, "Сводный вывод");
+  addPdfParagraph(doc, result.executiveSummary);
+  addPdfParagraph(doc, result.finalRecommendation);
+
+  addPdfSection(doc, "Где подходы согласны");
+  addPdfList(doc, result.whereAnalysesAgree);
+
+  addPdfSection(doc, "Противоречия");
+  addPdfList(doc, result.contradictions);
+
+  addPdfSection(doc, "Продуктовые следствия");
+  addPdfList(doc, result.productImplications);
+
+  addPdfSection(doc, "Что изменить до разработки");
+  addPdfList(doc, result.preDevelopmentChanges);
+
+  addPdfSection(doc, "Дизайн пилота");
+  addPdfList(doc, result.pilotDesign);
+
+  addPdfSection(doc, "Ранние сигналы");
+  addPdfList(doc, result.earlySignalsToWatch);
+
+  addPdfSection(doc, "Слой равновесия Нэша");
+  addPdfKeyValues(doc, [
+    ["Индекс Нэша", result.nash.nashScore],
+    ["Риск", getPdfRiskLabel(result.nash.riskLevel)],
+    ["Решение", getPdfVerdictLabel(result.nash.verdict)],
+    ["Игроков", result.nash.playersUsed?.length || 0],
+    ["Профилей", result.nash.profiles?.length || 0],
+  ]);
+  addPdfList(doc, result.nash.keyInsights);
+
+  addPdfSection(doc, "Слой экономики сложности");
+  addPdfKeyValues(doc, [
+    ["Устойчивость к сбоям", result.complexity.resilienceScore],
+    ["Способность к адаптации", result.complexity.adaptationCapacity],
+    ["Риск захвата траектории", result.complexity.lockInRisk],
+    ["Риск каскадного сбоя", result.complexity.cascadeRisk],
+    ["Сценариев", result.complexity.scenarios?.length || 0],
+  ]);
+  addPdfList(doc, result.complexity.keyInsights);
+
+  addPdfSection(doc, "Математическая интерпретация");
+  addPdfParagraph(doc, result.rawThinking);
+
+  addPdfFooter(doc);
+}
+
+function normalizeAnalysisModeInput(value: unknown): AnalysisMode | undefined {
+  if (value === "complexity" || value === "nash" || value === "integrated") {
+    return value;
+  }
+
+  return undefined;
+}
+
+function normalizeCreateAnalysisRequestBody(body: unknown): unknown {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return body;
+  }
+
+  const record = body as Record<string, unknown>;
+  const analysisMode =
+    normalizeAnalysisModeInput(record.analysisMode) ||
+    normalizeAnalysisModeInput(record.analysis_mode) ||
+    normalizeAnalysisModeInput(record.mode);
+
+  if (!analysisMode) {
+    return body;
+  }
+
+  return {
+    ...record,
+    analysisMode,
+  };
+}
+
+function upgradeIntegratedArticleIfNeeded(item: Analysis): Analysis {
+  if (!item.result || item.status !== "done") {
+    return item;
+  }
+
+  try {
+    const parsed = JSON.parse(item.result) as Partial<IntegratedAnalysisResult>;
+    const rawThinking = typeof parsed.rawThinking === "string" ? parsed.rawThinking.trim() : "";
+
+    if (
+      parsed.analysisMode !== "integrated" ||
+      parsed.modelKind !== "arthur_sandholm_hybrid" ||
+      typeof parsed.reachabilityOfNash !== "number" ||
+      rawThinking.length >= 3000
+    ) {
+      return item;
+    }
+
+    const { rawThinking: _rawThinking, ...withoutRawThinking } = parsed as IntegratedAnalysisResult;
+    const upgradedResult: IntegratedAnalysisResult = {
+      ...(withoutRawThinking as Omit<IntegratedAnalysisResult, "rawThinking">),
+      rawThinking: buildFallbackIntegratedArticle(
+        {
+          title: item.title,
+          description: item.description,
+          context: item.context,
+        },
+        withoutRawThinking as Omit<IntegratedAnalysisResult, "rawThinking">,
+      ),
+    };
+    return storage.updateAnalysisResult(item.id, JSON.stringify(upgradedResult), item.status) || {
+      ...item,
+      result: JSON.stringify(upgradedResult),
+    };
+  } catch {
+    return item;
+  }
+}
+
 export function registerRoutes(_httpServer: Server, app: Express) {
   const handleDeleteAnalysis = (req: Request, res: Response) => {
     const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -4679,17 +6005,18 @@ export function registerRoutes(_httpServer: Server, app: Express) {
     const id = parseInt(req.params.id, 10);
     const item = storage.getAnalysis(id);
     if (!item) return res.status(404).json({ error: "Not found" });
-    return res.json(item);
+    return res.json(upgradeIntegratedArticleIfNeeded(item));
   });
 
   // ─── Create + run analysis ─────────────────────────────────────────────────
   app.post("/api/analyses", async (req, res) => {
-    const parsed = insertAnalysisSchema.safeParse(req.body);
+    const parsed = insertAnalysisSchema.safeParse(normalizeCreateAnalysisRequestBody(req.body));
     if (!parsed.success) {
       return res.status(400).json({ error: parsed.error.flatten() });
     }
 
     const analysis = storage.createAnalysis(parsed.data);
+    console.info(`[analysis] created ${analysis.id} mode=${parsed.data.analysisMode}`);
     res.json(analysis);
 
     // Run LLM analysis in background
@@ -4779,13 +6106,14 @@ export function registerRoutes(_httpServer: Server, app: Express) {
     if (!item) {
       return res.status(404).json({ error: "Not found" });
     }
+    const upgradedItem = upgradeIntegratedArticleIfNeeded(item);
 
-    const result = parseAnalysisResultForPdf(item);
+    const result = parseAnalysisResultForPdf(upgradedItem);
     if (!result) {
       return res.status(409).json({ error: "PDF доступен только после успешного завершения анализа" });
     }
 
-    const filename = buildPdfFileName(item);
+    const filename = buildPdfFileName(upgradedItem);
     const encodedFilename = encodeURIComponent(filename);
 
     res.setHeader("Content-Type", "application/pdf");
@@ -4801,7 +6129,11 @@ export function registerRoutes(_httpServer: Server, app: Express) {
       info: {
         Title: item.title,
         Author: "Агент Нэша",
-        Subject: "Nash analysis",
+        Subject: isIntegratedPdfResult(result)
+          ? "Integrated Nash and complexity analysis"
+          : isComplexityPdfResult(result)
+            ? "Complexity analysis"
+            : "Nash analysis",
       },
     });
 
@@ -4815,7 +6147,13 @@ export function registerRoutes(_httpServer: Server, app: Express) {
     });
 
     doc.pipe(res);
-    writeAnalysisPdf(doc, item, result);
+    if (isIntegratedPdfResult(result)) {
+      writeIntegratedAnalysisPdf(doc, upgradedItem, result);
+    } else if (isComplexityPdfResult(result)) {
+      writeComplexityAnalysisPdf(doc, upgradedItem, result);
+    } else {
+      writeAnalysisPdf(doc, upgradedItem, result);
+    }
     doc.end();
   });
 
@@ -4895,9 +6233,380 @@ export function registerRoutes(_httpServer: Server, app: Express) {
 }
 
 // ─── LLM Runner ──────────────────────────────────────────────────────────────
+interface NashCoreProgressStepIds {
+  setup: AnalysisProgressStepId;
+  build: AnalysisProgressStepId;
+  score: AnalysisProgressStepId;
+  equilibrium: AnalysisProgressStepId;
+  article: AnalysisProgressStepId;
+  decision: AnalysisProgressStepId;
+}
+
+interface ComplexityCoreProgressStepIds {
+  setup: AnalysisProgressStepId;
+  scenarios: AnalysisProgressStepId;
+  simulation: AnalysisProgressStepId;
+  regimes: AnalysisProgressStepId;
+  article: AnalysisProgressStepId;
+  decision: AnalysisProgressStepId;
+}
+
+const DEFAULT_NASH_CORE_PROGRESS_STEPS: NashCoreProgressStepIds = {
+  setup: "setup_players",
+  build: "build_profiles",
+  score: "score_profiles",
+  equilibrium: "compute_equilibrium",
+  article: "agent_article",
+  decision: "decision_pack",
+};
+
+const INTEGRATED_NASH_PROGRESS_STEPS: NashCoreProgressStepIds = {
+  setup: "integrated_nash_setup",
+  build: "integrated_nash_profiles",
+  score: "integrated_nash_payoffs",
+  equilibrium: "integrated_nash_equilibrium",
+  article: "integrated_nash_article",
+  decision: "integrated_nash_decision",
+};
+
+const DEFAULT_COMPLEXITY_CORE_PROGRESS_STEPS: ComplexityCoreProgressStepIds = {
+  setup: "setup_players",
+  scenarios: "build_profiles",
+  simulation: "score_profiles",
+  regimes: "compute_equilibrium",
+  article: "agent_article",
+  decision: "decision_pack",
+};
+
+const INTEGRATED_COMPLEXITY_PROGRESS_STEPS: ComplexityCoreProgressStepIds = {
+  setup: "integrated_complexity_setup",
+  scenarios: "integrated_complexity_scenarios",
+  simulation: "integrated_complexity_simulation",
+  regimes: "integrated_complexity_regimes",
+  article: "integrated_complexity_article",
+  decision: "integrated_complexity_decision",
+};
+
+async function runNashAnalysisCore(
+  id: number,
+  data: { type: string; title: string; description: string; players: string; context: string },
+  client: OpenAI,
+  model: string,
+  hintedPlayers: Player[],
+  signal: AbortSignal,
+  stepIds: NashCoreProgressStepIds = DEFAULT_NASH_CORE_PROGRESS_STEPS,
+): Promise<AnalysisResult> {
+  activateAnalysisStep(id, stepIds.setup, {
+    phase: "setup",
+    phaseLabel: "Выделение игроков и границ игры",
+    llmStatus: "Определяем ключевых игроков, стимулы и границы игры",
+  });
+  const strategicSetup = await inferStrategicSetup(client, id, model, data, hintedPlayers, signal);
+  completeAnalysisStep(id, stepIds.setup);
+  throwIfAborted(signal);
+
+  activateAnalysisStep(id, stepIds.build, {
+    phase: "setup",
+    phaseLabel: "Генерация стратегий, допущений и профилей",
+    llmStatus: "Строим дерево стратегических профилей",
+  });
+  const baseProfiles = buildStrategyProfiles(strategicSetup.players);
+  completeAnalysisStep(id, stepIds.build);
+  activateAnalysisStep(id, stepIds.score, {
+    phase: "payoff",
+    phaseLabel: "Оценка стратегических профилей",
+    llmStatus: `Подготовили ${baseProfiles.length} профилей для оценки`,
+    profileCount: baseProfiles.length,
+    profileProcessedCount: 0,
+  });
+  updateLiveProgress(id, {
+    phase: "payoff",
+    phaseLabel: "Оценка стратегических профилей",
+    llmStatus: `Подготовили ${baseProfiles.length} профилей для оценки`,
+    profileCount: baseProfiles.length,
+    profileProcessedCount: 0,
+  });
+  const payoffAssessment = await assessProfiles(
+    client,
+    id,
+    model,
+    data,
+    strategicSetup.players,
+    strategicSetup.assumptions,
+    strategicSetup.caseFrame,
+    strategicSetup.aggregatedActors,
+    baseProfiles,
+    signal,
+  );
+  completeAnalysisStep(id, stepIds.score);
+  throwIfAborted(signal);
+
+  activateAnalysisStep(id, stepIds.equilibrium, {
+    phase: "finalizing",
+    phaseLabel: "Формирование результата Нэша",
+    llmStatus: "Ищем равновесия Нэша и собираем статический слой",
+  });
+
+  const confidence = clamp(
+    payoffAssessment.confidence +
+      Math.min(strategicSetup.players.length, 5) +
+      (strategicSetup.aggregatedActors.length > 0 ? 3 : 0),
+    20,
+    95,
+  );
+
+  const gameAnalysis = analyzeProfiles(
+    strategicSetup.players,
+    payoffAssessment.profiles,
+    confidence,
+  );
+  completeAnalysisStep(id, stepIds.equilibrium);
+
+  activateAnalysisStep(id, stepIds.article, {
+    phase: "finalizing",
+    phaseLabel: "Развёрнутый анализ Нэша",
+    llmStatus: "Генерируем объяснение механики игры",
+  });
+  const agentArticle = await generateAgentArticle(
+    client,
+    id,
+    model,
+    data,
+    strategicSetup.players,
+    strategicSetup.assumptions,
+    strategicSetup.aggregatedActors,
+    gameAnalysis,
+    {
+      profiles: payoffAssessment.profiles,
+      confidence,
+      gameType: payoffAssessment.gameType,
+      keyInsights: payoffAssessment.keyInsights,
+      breakEquilibriumMoves: payoffAssessment.breakEquilibriumMoves,
+      recommendations: payoffAssessment.recommendations,
+      sensitivityChecks: payoffAssessment.sensitivityChecks,
+    },
+    signal,
+  );
+  completeAnalysisStep(id, stepIds.article);
+  throwIfAborted(signal);
+
+  activateAnalysisStep(id, stepIds.decision, {
+    phase: "finalizing",
+    phaseLabel: "Пакет решения по равновесию",
+    llmStatus: "Собираем стратегические ходы, проверки и ограничители запуска",
+  });
+  const decisionPack = await generateDecisionPack(
+    client,
+    id,
+    model,
+    data,
+    strategicSetup.players,
+    strategicSetup.assumptions,
+    strategicSetup.aggregatedActors,
+    gameAnalysis,
+    {
+      confidence,
+      gameType: payoffAssessment.gameType,
+      keyInsights: payoffAssessment.keyInsights,
+      breakEquilibriumMoves: payoffAssessment.breakEquilibriumMoves,
+      recommendations: payoffAssessment.recommendations,
+      sensitivityChecks: payoffAssessment.sensitivityChecks,
+    },
+    signal,
+  );
+  completeAnalysisStep(id, stepIds.decision);
+  throwIfAborted(signal);
+
+  const pairwiseViews = buildPairwiseViews(
+    strategicSetup.players,
+    payoffAssessment.profiles,
+    gameAnalysis.equilibria,
+    gameAnalysis.recommendedEquilibrium,
+  );
+  const primaryPairwise = pairwiseViews[0];
+
+  return {
+    analysisMode: "nash",
+    playersUsed: strategicSetup.players,
+    aggregatedActors: strategicSetup.aggregatedActors,
+    assumptions: uniqueStrings([
+      ...strategicSetup.assumptions,
+      strategicSetup.caseFrame ? `Фрейм игры: ${strategicSetup.caseFrame}` : "",
+    ]),
+    profiles: payoffAssessment.profiles,
+    confidence,
+    pairwiseViews,
+    sensitivityChecks: payoffAssessment.sensitivityChecks,
+    equilibria: gameAnalysis.equilibria,
+    recommendedEquilibrium: gameAnalysis.recommendedEquilibrium,
+    nashScore: gameAnalysis.nashScore,
+    riskLevel: gameAnalysis.riskLevel,
+    verdict: gameAnalysis.verdict,
+    gameType: payoffAssessment.gameType,
+    keyInsights: payoffAssessment.keyInsights,
+    breakEquilibriumMoves: payoffAssessment.breakEquilibriumMoves,
+    recommendations: payoffAssessment.recommendations,
+    decisionPack,
+    runtimeStats: buildRuntimeStats(id),
+    payoffMatrix: primaryPairwise?.matrix || [],
+    matrixPlayers: primaryPairwise ? [...primaryPairwise.players] : [],
+    matrixStrategies: primaryPairwise?.matrixStrategies || {},
+    rawThinking: agentArticle,
+  };
+}
+
+async function runComplexityAnalysisCore(
+  id: number,
+  data: { type: string; title: string; description: string; context: string },
+  client: OpenAI,
+  model: string,
+  signal: AbortSignal,
+  stepIds: ComplexityCoreProgressStepIds = DEFAULT_COMPLEXITY_CORE_PROGRESS_STEPS,
+): Promise<ComplexityAnalysisResult> {
+  activateAnalysisStep(id, stepIds.setup, {
+    phase: "setup",
+    phaseLabel: "Сборка адаптивной модели системы",
+    llmStatus: "Выделяем игроков, переменные состояния и обратные связи",
+  });
+  const setup = await inferComplexitySetup(client, id, model, data, signal);
+  completeAnalysisStep(id, stepIds.setup);
+  throwIfAborted(signal);
+
+  activateAnalysisStep(id, stepIds.scenarios, {
+    phase: "setup",
+    phaseLabel: "Подготовка сценариев",
+    llmStatus: "Формируем базовый сценарий, сценарий ускоренного роста и стресс-сценарий",
+    profileCount: setup.scenarioDefinitions.length,
+    profileProcessedCount: 0,
+  });
+  completeAnalysisStep(id, stepIds.scenarios);
+
+  activateAnalysisStep(id, stepIds.simulation, {
+    phase: "payoff",
+    phaseLabel: "Прогон адаптивной симуляции",
+    llmStatus: "Сервер детерминированно прогоняет сценарии без обращения к LLM на каждом шаге",
+    profileCount: setup.scenarioDefinitions.length,
+    profileProcessedCount: 0,
+  });
+  appendPhaseHeader(id, "Прогон адаптивной симуляции");
+  const simulation = simulateComplexitySystem(setup);
+  appendLivePreview(
+    id,
+    `Симуляция завершена: ${simulation.scenarios.length} сценария, ${simulation.scenarios[0]?.steps.length || 0} шагов.\n`,
+    {
+      phase: "payoff",
+      phaseLabel: "Прогон адаптивной симуляции",
+      llmStatus: "Сценарии рассчитаны, ищем режимы системы",
+      profileCount: setup.scenarioDefinitions.length,
+      profileProcessedCount: setup.scenarioDefinitions.length,
+    },
+    false,
+  );
+  completeAnalysisStep(id, stepIds.simulation);
+  throwIfAborted(signal);
+
+  activateAnalysisStep(id, stepIds.regimes, {
+    phase: "finalizing",
+    phaseLabel: "Поиск режимов системы",
+    llmStatus: "Определяем пороговые переломы, каскадные риски и захват траектории",
+  });
+  completeAnalysisStep(id, stepIds.regimes);
+
+  activateAnalysisStep(id, stepIds.article, {
+    phase: "finalizing",
+    phaseLabel: "Развёрнутый анализ траектории системы",
+    llmStatus: "Генерируем объяснение динамики системы для менеджера продукта",
+  });
+  const rawThinking = await generateComplexityArticle(client, id, model, data, setup, simulation, signal);
+  completeAnalysisStep(id, stepIds.article);
+  throwIfAborted(signal);
+
+  activateAnalysisStep(id, stepIds.decision, {
+    phase: "finalizing",
+    phaseLabel: "Пакет решения по адаптивной траектории",
+    llmStatus: "Собираем вердикт, ранние сигналы и рекомендации",
+  });
+  const decision = await generateComplexityDecisionPack(client, id, model, data, setup, simulation, signal);
+  completeAnalysisStep(id, stepIds.decision);
+  throwIfAborted(signal);
+
+  const result = composeComplexityResult(
+    setup.title || data.title,
+    setup,
+    simulation,
+    decision,
+    rawThinking,
+    buildRuntimeStats(id),
+  );
+
+  assertComplexityGuardrails(result);
+  return result;
+}
+
+async function runComplexityAnalysis(
+  id: number,
+  data: { type: string; title: string; description: string; context: string },
+  client: OpenAI,
+  model: string,
+  signal: AbortSignal,
+) {
+  const result = await runComplexityAnalysisCore(id, data, client, model, signal);
+  persistAnalysisResult(id, JSON.stringify(result), "done");
+  completeAllAnalysisSteps(id);
+  finalizeLiveProgress(id, "done");
+}
+
+async function runIntegratedAnalysis(
+  id: number,
+  data: { type: string; title: string; description: string; players: string; context: string },
+  client: OpenAI,
+  model: string,
+  hintedPlayers: Player[],
+  signal: AbortSignal,
+) {
+  appendPhaseHeader(id, "Статический слой: равновесие Нэша");
+  const nash = await runNashAnalysisCore(id, data, client, model, hintedPlayers, signal, INTEGRATED_NASH_PROGRESS_STEPS);
+  throwIfAborted(signal);
+
+  appendPhaseHeader(id, "Динамический слой: экономика сложности");
+  const complexity = await runComplexityAnalysisCore(id, data, client, model, signal, INTEGRATED_COMPLEXITY_PROGRESS_STEPS);
+  throwIfAborted(signal);
+
+  activateAnalysisStep(id, "integrated_synthesis", {
+    phase: "finalizing",
+    phaseLabel: "Совмещённый вывод",
+    llmStatus: "Считаем достижимость равновесия через адаптивную динамику",
+  });
+  appendPhaseHeader(id, "Совмещение Нэша и экономики сложности");
+  const result = composeIntegratedAnalysisResult(data, nash, complexity, buildRuntimeStats(id));
+  appendLivePreview(
+    id,
+    `${result.executiveSummary}\n`,
+    {
+      phase: "finalizing",
+      phaseLabel: "Совмещённый вывод",
+      llmStatus: result.finalRecommendation,
+    },
+    false,
+  );
+  updateLiveProgress(id, {
+    phase: "finalizing",
+    phaseLabel: "Развёрнутый совмещённый вывод",
+    llmStatus: "Готовим объясняющую статью для руководителя",
+    activeStepId: "integrated_synthesis",
+  });
+  result.rawThinking = await generateIntegratedArticle(client, id, model, data, result, signal);
+  result.runtimeStats = buildRuntimeStats(id);
+  completeAnalysisStep(id, "integrated_synthesis");
+
+  persistAnalysisResult(id, JSON.stringify(result), "done");
+  completeAllAnalysisSteps(id);
+  finalizeLiveProgress(id, "done");
+}
+
 async function runAnalysis(
   id: number,
-  data: { type: string; title: string; description: string; players: string; context: string }
+  data: { type: string; analysisMode?: AnalysisMode; title: string; description: string; players: string; context: string }
 ) {
   const initialAnalysis = storage.getAnalysis(id);
   if (!initialAnalysis || initialAnalysis.status === "cancelled") {
@@ -4937,12 +6646,17 @@ async function runAnalysis(
         phase: "finalizing",
         phaseLabel: "Локальный debug-режим",
         llmStatus: "Собираем результат без внешнего LLM",
-        activeStepId: "decision_pack",
+        activeStepId: data.analysisMode === "integrated" ? "integrated_synthesis" : "decision_pack",
       });
-      const result = {
-        ...runLocalDebugAnalysis(data),
-        runtimeStats: buildRuntimeStats(id),
-      };
+      const runtimeStats = buildRuntimeStats(id);
+      const result = data.analysisMode === "integrated"
+        ? runLocalDebugIntegratedAnalysis(data, runtimeStats)
+        : data.analysisMode === "complexity"
+          ? runLocalDebugComplexityAnalysis(data, runtimeStats)
+          : {
+              ...runLocalDebugAnalysis(data),
+              runtimeStats,
+            };
       throwIfAborted(controller.signal);
       persistAnalysisResult(id, JSON.stringify(result), "done");
       completeAllAnalysisSteps(id);
@@ -4973,6 +6687,16 @@ async function runAnalysis(
       llmStatus: `Используем модель: ${model}`,
     });
     console.info(`[llm] analysis ${id} using ${llmConfig.provider} model "${model}" via ${llmConfig.baseURL}`);
+
+    if (data.analysisMode === "integrated") {
+      await runIntegratedAnalysis(id, data, client, model, hintedPlayers, controller.signal);
+      return;
+    }
+
+    if (data.analysisMode === "complexity") {
+      await runComplexityAnalysis(id, data, client, model, controller.signal);
+      return;
+    }
 
     activateAnalysisStep(id, "setup_players", {
       phase: "setup",
@@ -5104,6 +6828,7 @@ async function runAnalysis(
     const primaryPairwise = pairwiseViews[0];
 
     const result: AnalysisResult = {
+      analysisMode: "nash",
       playersUsed: strategicSetup.players,
       aggregatedActors: strategicSetup.aggregatedActors,
       assumptions: uniqueStrings([
