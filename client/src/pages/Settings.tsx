@@ -31,8 +31,8 @@ const EMPTY_SETTINGS: PublicAppSettings = {
   },
   yandex: {
     baseURL: "https://ai.api.cloud.yandex.net/v1",
-    model: "gpt://b1gjb9f0e5t7ii1s2p9l/qwen3.5-35b-a3b-fp8/latest",
-    projectId: "b1gjb9f0e5t7ii1s2p9l",
+    model: "",
+    projectId: "",
     timeoutMs: 900000,
     maxOutputTokens: 40000,
     temperature: 0.8,
@@ -312,11 +312,21 @@ export default function Settings() {
                 <Input id="yandex-base-url" value={yandexBaseURL} onChange={(event) => setYandexBaseURL(event.target.value)} />
               </Field>
               <Field id="yandex-project-id" label="OpenAI-Project">
-                <Input id="yandex-project-id" value={yandexProjectId} onChange={(event) => setYandexProjectId(event.target.value)} />
+                <Input
+                  id="yandex-project-id"
+                  value={yandexProjectId}
+                  placeholder="Введите project ID из Yandex Cloud"
+                  onChange={(event) => setYandexProjectId(event.target.value)}
+                />
               </Field>
               <div className="md:col-span-2">
                 <Field id="yandex-model" label="Модель">
-                  <Input id="yandex-model" value={yandexModel} onChange={(event) => setYandexModel(event.target.value)} />
+                  <Input
+                    id="yandex-model"
+                    value={yandexModel}
+                    placeholder="Введите URI модели Yandex AI Studio"
+                    onChange={(event) => setYandexModel(event.target.value)}
+                  />
                 </Field>
               </div>
               <Field id="yandex-api-key" label="API key">
@@ -356,7 +366,7 @@ export default function Settings() {
                   {provider === "yandex" ? "Yandex AI Studio" : "Локальная LLM"}
                 </div>
                 <div className="mt-1 break-words text-sm text-muted-foreground">
-                  {provider === "yandex" ? yandexModel : localModel}
+                  {provider === "yandex" ? yandexModel || "Модель не указана" : localModel}
                 </div>
               </div>
 

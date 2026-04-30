@@ -621,11 +621,8 @@ function getDefaultSettings(): AppSettings {
     yandex: {
       baseURL: (process.env.YANDEX_AI_STUDIO_BASE_URL || "https://ai.api.cloud.yandex.net/v1").trim(),
       apiKey: (process.env.YANDEX_AI_STUDIO_API_KEY || "").trim(),
-      projectId: (process.env.YANDEX_AI_STUDIO_PROJECT_ID || "b1gjb9f0e5t7ii1s2p9l").trim(),
-      model: (
-        process.env.YANDEX_AI_STUDIO_MODEL ||
-        "gpt://b1gjb9f0e5t7ii1s2p9l/qwen3.5-35b-a3b-fp8/latest"
-      ).trim(),
+      projectId: (process.env.YANDEX_AI_STUDIO_PROJECT_ID || "").trim(),
+      model: (process.env.YANDEX_AI_STUDIO_MODEL || "").trim(),
       timeoutMs: readIntEnv("YANDEX_AI_STUDIO_TIMEOUT_MS", 15 * 60 * 1000),
       maxOutputTokens: readIntEnv("YANDEX_AI_STUDIO_MAX_OUTPUT_TOKENS", 40000),
       temperature: readNumberEnv("YANDEX_AI_STUDIO_TEMPERATURE", 0.8),
@@ -5078,19 +5075,34 @@ function shouldUseLocalDebugLLM(): boolean {
   return String(process.env.DEBUG_LOCAL_LLM || "").toLowerCase() === "true";
 }
 
+function isPlaceholderSettingValue(value: string | undefined): boolean {
+  const normalized = (value || "").trim().toLowerCase();
+  return !normalized || normalized === "auto" || normalized.includes("<your-") || normalized.includes("your-");
+}
+
+function assertLlmProviderConfigured(config: ProviderSettings & { provider: LlmProvider }) {
+  if (!config.baseURL || !config.apiKey) {
+    throw new Error(
+      config.provider === "yandex"
+        ? "Yandex AI Studio не настроен: укажите API-ключ, OpenAI-Project и модель"
+        : "Локальная LLM не настроена: проверьте base URL и API key"
+    );
+  }
+
+  if (
+    config.provider === "yandex" &&
+    (isPlaceholderSettingValue(config.projectId) || isPlaceholderSettingValue(config.model))
+  ) {
+    throw new Error("Yandex AI Studio не настроен: укажите OpenAI-Project и URI модели");
+  }
+}
+
 async function testLlmConnection(config: ProviderSettings & { provider: LlmProvider }): Promise<{
   provider: LlmProvider;
   model: string;
   response: string;
 }> {
-  if (!config.baseURL || !config.apiKey) {
-    throw new Error(
-      config.provider === "yandex"
-        ? "Yandex AI Studio не настроен: укажите API-ключ"
-        : "Локальная LLM не настроена: проверьте base URL и API key"
-    );
-  }
-
+  assertLlmProviderConfigured(config);
   const client = createOpenAIClient(config);
   const model = await resolveConfiguredModel(config);
   const response = await client.chat.completions.create(
@@ -6666,13 +6678,7 @@ async function runAnalysis(
 
     const hintedPlayers = parsePlayersInput(data.players);
     const llmConfig = getActiveLlmConfig();
-    if (!llmConfig.baseURL || !llmConfig.apiKey) {
-      throw new Error(
-        llmConfig.provider === "yandex"
-          ? "Yandex AI Studio не настроен: добавьте API-ключ в настройках или YANDEX_AI_STUDIO_API_KEY в .env"
-          : "Локальная LLM не настроена: проверьте base URL и API key для LM Studio"
-      );
-    }
+    assertLlmProviderConfigured(llmConfig);
 
     const client = createOpenAIClient(llmConfig);
     analysisRuntimeConfigs.set(id, llmConfig);
